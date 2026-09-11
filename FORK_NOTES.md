@@ -42,8 +42,10 @@ There is no fork product name in the guest UI.
 Prefer immutable tags:
 
 ```text
-ghcr.io/halcycon/shed:1.8.6-guestux.1
+ghcr.io/halcycon/shed:1.8.6-guestux.2
 ```
+
+(`1.8.6-guestux.1` is also published; prefer `.2` or newer.)
 
 Branch pushes also publish `ghcr.io/halcycon/shed:guestux` (mutable smoke tag).
 
@@ -57,7 +59,7 @@ Build via GitHub Actions on push to `guestux`, on tags matching `*-guestux.*`, o
 2. In Arcane, change only the image:
 
    - from: `ghcr.io/muxshed/shed:1.8.6`
-   - to:   `ghcr.io/halcycon/shed:1.8.6-guestux.N`
+   - to:   `ghcr.io/halcycon/shed:1.8.6-guestux.2`
 
 3. Keep `/config` and `/data` volumes unchanged.
 4. Rollback: set the image back to `ghcr.io/muxshed/shed:1.8.6`.
