@@ -1,6 +1,10 @@
 <!-- Licensed under the GNU Affero General Public License v3.0 — see LICENSE. -->
 <script lang="ts">
-	import { onMount, onDestroy } from 'svelte';
+	/**
+	 * WS-FLV preview. Grid uses a safer buffer; Preview/Program use a chased
+	 * monitor profile (still FLV — no server re-encode / WHEP).
+	 */
+	import { onDestroy } from 'svelte';
 	import mpegts from 'mpegts.js';
 	import {
 		createMediaElementMeter,
@@ -15,8 +19,13 @@
 		monitorAudio = false,
 		/** Optional bindable 0–1 level from the preview's AnalyserNode. */
 		audioLevel = $bindable(0),
-		/** Show transport latency cue (grid uses buffered WS-FLV). */
-		latencyHint = 'delayed' as 'delayed' | 'none',
+		/**
+		 * grid — conservative buffer, ~2–5s cue
+		 * monitor — aggressive chase for Preview/Program switching
+		 */
+		profile = 'grid' as 'grid' | 'monitor',
+		/** Override badge; default follows profile. */
+		latencyHint = undefined as 'delayed' | 'monitor' | 'none' | undefined,
 		onclick
 	}: {
 		sourceId: string;
@@ -24,28 +33,63 @@
 		active?: boolean;
 		monitorAudio?: boolean;
 		audioLevel?: number;
-		latencyHint?: 'delayed' | 'none';
+		profile?: 'grid' | 'monitor';
+		latencyHint?: 'delayed' | 'monitor' | 'none';
 		onclick?: () => void;
 	} = $props();
 
-	let videoEl: HTMLVideoElement;
+	let videoEl = $state<HTMLVideoElement | null>(null);
 	let player: mpegts.Player | null = null;
 	let destroyed = false;
 	let meter: MediaElementMeterHandle | null = null;
 	let meterRaf = 0;
 
+	const hint = $derived(
+		latencyHint ?? (profile === 'monitor' ? 'monitor' : 'delayed')
+	);
+
 	$effect(() => {
 		meter?.setMonitoring(monitorAudio);
-		// Keep the element muted attribute in sync as a safety net; actual
-		// audible path is the Web Audio gain node.
 		if (videoEl) videoEl.muted = !monitorAudio;
 	});
 
-	function createPlayer() {
+	// Recreate the player when source or profile changes (no full component remount).
+	$effect(() => {
+		const id = sourceId;
+		const prof = profile;
+		const el = videoEl;
+		if (!el || destroyed) return;
+
+		destroyPlayer();
+		createPlayer(id, prof, el);
+
+		return () => {
+			destroyPlayer();
+		};
+	});
+
+	function bufferOpts(prof: 'grid' | 'monitor') {
+		if (prof === 'monitor') {
+			return {
+				enableWorker: false as const,
+				liveBufferLatencyChasing: true,
+				liveBufferLatencyMaxLatency: 0.7,
+				liveBufferLatencyMinRemain: 0.12
+			};
+		}
+		return {
+			enableWorker: false as const,
+			liveBufferLatencyChasing: true,
+			liveBufferLatencyMaxLatency: 1.5,
+			liveBufferLatencyMinRemain: 0.3
+		};
+	}
+
+	function createPlayer(id: string, prof: 'grid' | 'monitor', el: HTMLVideoElement) {
 		if (!mpegts.isSupported() || destroyed) return;
 
 		const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-		const url = `${proto}//${window.location.host}/api/v1/sources/${sourceId}/preview`;
+		const url = `${proto}//${window.location.host}/api/v1/sources/${id}/preview`;
 
 		player = mpegts.createPlayer(
 			{
@@ -53,25 +97,22 @@
 				isLive: true,
 				url
 			},
-			{
-				enableWorker: false,
-				liveBufferLatencyChasing: true,
-				liveBufferLatencyMaxLatency: 1.5,
-				liveBufferLatencyMinRemain: 0.3
-			}
+			bufferOpts(prof)
 		);
 
 		player.on(mpegts.Events.ERROR, () => {
 			destroyPlayer();
 			if (!destroyed) {
-				setTimeout(createPlayer, 2000);
+				setTimeout(() => {
+					if (!destroyed && videoEl) createPlayer(id, prof, videoEl);
+				}, 1500);
 			}
 		});
 
-		player.attachMediaElement(videoEl);
+		player.attachMediaElement(el);
 		player.load();
 
-		videoEl.onloadeddata = () => {
+		el.onloadeddata = () => {
 			if (!destroyed && videoEl) {
 				videoEl.play().catch(() => {});
 				ensureMeter();
@@ -112,10 +153,6 @@
 		}
 	}
 
-	onMount(() => {
-		createPlayer();
-	});
-
 	onDestroy(() => {
 		destroyed = true;
 		destroyPlayer();
@@ -129,12 +166,19 @@
 	onclick={onclick}
 >
 	<video bind:this={videoEl} class="h-full w-full object-contain" muted playsinline></video>
-	{#if latencyHint === 'delayed'}
+	{#if hint === 'delayed'}
 		<div
 			class="absolute top-2 left-2 rounded-sm border border-border-dim bg-panel-raised/90 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-amber-muted"
-			title="Grid previews use buffered FLV (~2–5s). Use Preview/Program for low-latency switching."
+			title="Grid tiles use a safer FLV buffer. Use Preview/Program (tuned FLV) when switching."
 		>
 			~2–5s
+		</div>
+	{:else if hint === 'monitor'}
+		<div
+			class="absolute top-2 left-2 rounded-sm border border-border-dim bg-panel-raised/90 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-amber"
+			title="Tuned FLV monitor (no WebRTC re-encode). Still slightly behind the contribution."
+		>
+			Monitor FLV
 		</div>
 	{/if}
 	{#if label}

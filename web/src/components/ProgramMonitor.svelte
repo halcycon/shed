@@ -1,7 +1,7 @@
 <!-- Licensed under the GNU Affero General Public License v3.0 — see LICENSE. -->
 <script lang="ts">
-	/** Program bus WHEP monitor (thin wrapper). */
-	import WhepMonitor from './WhepMonitor.svelte';
+	/** Program bus monitor — tuned WS-FLV (no WHEP re-encode). */
+	import VideoPreview from './VideoPreview.svelte';
 
 	let {
 		fallbackSourceId = null as string | null,
@@ -16,10 +16,16 @@
 	} = $props();
 </script>
 
-<WhepMonitor
-	target={{ kind: 'program' }}
-	{fallbackSourceId}
-	{monitorAudio}
-	bind:audioLevel
-	{active}
-/>
+{#if fallbackSourceId}
+	<VideoPreview
+		sourceId={fallbackSourceId}
+		profile="monitor"
+		{monitorAudio}
+		bind:audioLevel
+		{active}
+	/>
+{:else}
+	<div class="scanlines-well flex aspect-video items-center justify-center border border-border">
+		<span class="text-amber-muted">No source</span>
+	</div>
+{/if}

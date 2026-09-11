@@ -36,11 +36,9 @@
 		</button>
 	</header>
 	{#if sourceId}
-		{#key sourceId}
-			<div class="flex-1">
-				<ProgramMonitor fallbackSourceId={sourceId} active={true} {monitorAudio} />
-			</div>
-		{/key}
+		<div class="flex-1">
+			<ProgramMonitor fallbackSourceId={sourceId} active={true} {monitorAudio} />
+		</div>
 		<p class="border-t border-border-dim px-3 py-1 text-[11px] text-amber-muted">
 			Monitor Audio is local to this browser only. Prefer headphones to avoid acoustic feedback.
 		</p>

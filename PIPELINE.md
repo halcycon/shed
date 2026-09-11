@@ -18,7 +18,9 @@ Outputs from program_tx
   RTMP destinations ──► ffmpeg -c copy (default)   [no-transcode]
                      └── or transcode if OutputConfig.transcode_egress=true
   Channel HLS       ──► libx264+AAC (required for browser watch)
-  Studio WHEP       ──► VP8+Opus (Preview + Program only; not the grid)
+  Studio monitors   ──► WS-FLV (mpegts.js); Preview/Program use a chased buffer
+                        WHEP API still exists but Studio UI does not use it
+                        (VP8 re-encode was slower than FLV under live + HLS load)
 
 Scenes
   Multi-layer       ──► compositor encode (required)
@@ -32,10 +34,10 @@ Scenes
 
 | Surface | Transport | Expectation |
 |---------|-----------|-------------|
-| Source grid | WS-FLV | ~2–5 s (labelled) |
-| Preview / Program | WHEP → FLV fallback | Low latency when WHEP works |
+| Source grid | WS-FLV (safer buffer) | ~2–5 s (labelled) |
+| Preview / Program | WS-FLV (chased buffer) | Monitor FLV — faster switches, still not contribution-live |
 
-Do **not** attach a WHEP encoder to every grid tile — that fights the no-transcode capacity model.
+Do **not** attach a WHEP/VP8 encoder to Studio monitors — under load it lagged behind plain FLV.
 
 ## Escape hatches
 

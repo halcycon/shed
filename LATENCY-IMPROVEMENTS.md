@@ -912,23 +912,15 @@ Do NOT:
 
 # Proposed implementation order
 
-## PR 1 — WebRTC Program Monitor
+## PR 1 — WebRTC Program Monitor — **withdrawn from Studio UI (guestux.10)**
 
-Implement:
-
-    Program -> WHEP/WebRTC -> browser
-
-Retain WS-FLV fallback.
-
-Measure latency.
+WHEP API remains; Studio Preview/Program use chased WS-FLV instead (VP8 re-encode lost to FLV under load).
 
 ---
 
-## PR 2 — Source WebRTC Preview — **done (guestux.8)**
+## PR 2 — Source WebRTC Preview — **withdrawn from Studio UI (guestux.10)**
 
-WHEP for Preview / selected source (`POST /api/v1/sources/{id}/whep`).
-
-Thumbnails stay on WS-FLV (no per-tile encoder). Program + Preview share `WhepMonitor`.
+Same as PR 1.
 
 ---
 

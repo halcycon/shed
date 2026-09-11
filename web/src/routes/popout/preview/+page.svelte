@@ -1,7 +1,7 @@
 <!-- Licensed under the GNU Affero General Public License v3.0 — see LICENSE. -->
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import WhepMonitor from '../../../components/WhepMonitor.svelte';
+	import VideoPreview from '../../../components/VideoPreview.svelte';
 
 	let sourceId = $state<string | null>(null);
 	let channel: BroadcastChannel;
@@ -24,14 +24,9 @@
 <section class="panel flex h-[calc(100vh-24px)] flex-col">
 	<header class="panel__head"><span class="text-amber-dim">▮ PREVIEW / NEXT UP</span></header>
 	{#if sourceId}
-		{#key sourceId}
-			<div class="flex-1">
-				<WhepMonitor
-					target={{ kind: 'source', sourceId }}
-					fallbackSourceId={sourceId}
-				/>
-			</div>
-		{/key}
+		<div class="flex-1">
+			<VideoPreview {sourceId} profile="monitor" />
+		</div>
 	{:else}
 		<div class="scanlines-well flex flex-1 items-center justify-center border-t border-border">
 			<span class="text-amber-muted">No preview source selected</span>

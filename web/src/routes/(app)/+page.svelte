@@ -16,7 +16,6 @@
 	import StatusIndicator from '../../components/StatusIndicator.svelte';
 	import VideoPreview from '../../components/VideoPreview.svelte';
 	import ProgramMonitor from '../../components/ProgramMonitor.svelte';
-	import WhepMonitor from '../../components/WhepMonitor.svelte';
 	import { popout } from '$lib/popout';
 	import PopoutButton from '../../components/PopoutButton.svelte';
 	import { Checkbox } from '$lib/components/ui/checkbox';
@@ -398,12 +397,7 @@
 					{/if}
 				</header>
 				{#if previewSourceId}
-					{#key previewSourceId}
-						<WhepMonitor
-							target={{ kind: 'source', sourceId: previewSourceId }}
-							fallbackSourceId={previewSourceId}
-						/>
-					{/key}
+					<VideoPreview sourceId={previewSourceId} profile="monitor" />
 				{:else}
 					<div class="scanlines-well flex aspect-video items-center justify-center border-t border-border">
 						<span class="text-amber-muted">Select a source below to queue</span>
@@ -435,14 +429,12 @@
 					</div>
 				</header>
 				{#if programSourceId}
-					{#key programSourceId}
-						<ProgramMonitor
-							fallbackSourceId={programSourceId}
-							active={true}
-							monitorAudio={programMonitorAudio}
-							bind:audioLevel={programAudioLevel}
-						/>
-					{/key}
+					<ProgramMonitor
+						fallbackSourceId={programSourceId}
+						active={true}
+						monitorAudio={programMonitorAudio}
+						bind:audioLevel={programAudioLevel}
+					/>
 					<p class="border-t border-border-dim px-3 py-1 text-[11px] text-amber-muted">
 						Monitor Audio is local to this browser only. Prefer headphones to avoid acoustic feedback.
 					</p>

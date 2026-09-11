@@ -39,16 +39,10 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
 - `crates/api/src/channel_hls.rs` — deterministic HLS bootstrap (seq headers + keyframe gate)
 - `crates/api/src/routes/stream.rs` — prime HLS with video+audio headers for the effective programme
 - `crates/api/src/program.rs` — `resolve_program_audio_source` (scenes without AAC → first layer)
-- `crates/api/src/program_whep.rs` + `routes/whep_program.rs` — Program + source WHEP hubs
-- `web/src/components/WhepMonitor.svelte` + `whep-player.ts` — WHEP with WS-FLV fallback
-- `web/src/components/ProgramMonitor.svelte` — thin Program wrapper around `WhepMonitor`
-- Studio Preview + popout Preview use source WHEP; **grid stays WS-FLV** with `~2–5s` cue
-- Preview/Program show **Low latency** when WHEP is up
-- `web/src/routes/(app)/channel/+page.svelte` — remove stale GStreamer wording
-- `web/src/components/VideoPreview.svelte` — meters + latency hint
-- Studio / popout Program: local “Monitor Audio” toggle (headphones recommended)
-- Fake `Math.random()` mixer meters replaced with Program-preview analyser levels
-- `LATENCY-IMPROVEMENTS.md` — WHEP + no-transcode done; HW / NDI / public WHEP deferred
+- `crates/api/src/program_whep.rs` + `routes/whep_program.rs` — WHEP API kept (unused by Studio UI)
+- Studio Preview/Program/popouts: **tuned WS-FLV** (`VideoPreview` `profile="monitor"`)
+- Source grid: safer FLV buffer + `~2–5s` cue; monitors show `Monitor FLV`
+- `LATENCY-IMPROVEMENTS.md` — WHEP Studio monitors withdrawn; no-transcode egress kept
 
 ### Packaging
 
@@ -68,26 +62,20 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
 4. **Egress always transcoded** — contradicted upstream “RTMP forwarded not re-encoded”; default
    is remux again. Going live used to spin `libx264 -preset medium` per destination and starve
    Program WHEP.
+5. **Studio WHEP slower than FLV** — monitor path re-encoded to VP8; under live+HLS load it
+   lagged and keyframe-stalled. Studio UI reverted to chased WS-FLV (guestux.10).
 
-## Program + Preview WHEP (latency PR 1–2)
+## Studio monitors (guestux.10)
 
-Studio monitors can use **WHEP** (auth required):
+Preview / Program use **WS-FLV** with aggressive mpegts latency chasing — no WebRTC re-encode.
+Source switches reuse the same component (no full remount / WHEP renegotiate).
 
-| Feed | Endpoint | Encoder input |
-|------|----------|----------------|
-| Program | `POST /api/v1/program/whep` | `program_tx` FLV |
-| Preview / one source | `POST /api/v1/sources/{id}/whep` | that source’s `media_relays` FLV |
-
-- Shared ffmpeg per active feed: FLV → VP8 + Opus RTP → send-only WebRTC peers
-- UI tries WHEP first; on failure falls back to WS-FLV
-- **Only Preview + Program** get WHEP (one encoder per feed). Source grid stays FLV
-- Monitor Audio remains local-only / muted by default
-- Deferred: HW encode, NDI, public WHEP (`PIPELINE.md`)
+WHEP endpoints remain in the API for experiments; Studio does not open them.
 
 ### Latency check (manual)
 
-Display a ms stopwatch to a guest camera; photograph guest → Preview / Program (WHEP)
-vs prior WS-FLV. Confirm Program WHEP stays snappy **while live** after egress copy.
+Grid should feel more buffered than Preview/Program. Going live + opening `/watch` must not
+make Program slower than the grid.
 
 ## Branding
 
@@ -99,14 +87,14 @@ There is no fork product name in the guest UI.
 Prefer immutable tags:
 
 ```text
-ghcr.io/halcycon/shed:1.8.6-guestux.9
+ghcr.io/halcycon/shed:1.8.6-guestux.10
 ```
 
 Branch pushes also publish `ghcr.io/halcycon/shed:guestux` (mutable smoke tag).
 
 ## Arcane deploy / rollback
 
-1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.9` (or newer).
+1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.10` (or newer).
 2. In Arcane, set image to that tag (volumes unchanged).
 3. Rollback: `ghcr.io/muxshed/shed:1.8.6`.
 
@@ -147,5 +135,6 @@ cargo test -p muxshed-api scene_compositor --lib
 - Scene on Program → guest layer audio audible (no silence)
 - Program “Monitor Audio” toggles local speaker only; mixer bars track real levels
 - Guest blur / WHIP / Opus unchanged from prior guestux builds
-- Go live with RTMP dest → logs show `egress: remux copy`; Program WHEP stays usable
-- Source grid shows `~2–5s`; Preview/Program show `Low latency` when WHEP connects
+- Go live with RTMP dest → logs show `egress: remux copy`
+- Source grid shows `~2–5s`; Preview/Program show `Monitor FLV` and switch quickly
+- While live + `/watch` open, Program must not feel slower than the grid
