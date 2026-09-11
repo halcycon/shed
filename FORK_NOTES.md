@@ -45,6 +45,8 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
 ### Packaging
 
 - `.github/workflows/docker.yml` — builds `guestux` branch and `*-guestux.*` tags
+- `docker/Dockerfile` — runtime includes `wget` so common orchestrator healthchecks work
+  (Arcane’s default `wget`-based probe failed on the stock image)
 
 ## Root causes (stretch fixes)
 
@@ -66,14 +68,14 @@ There is no fork product name in the guest UI.
 Prefer immutable tags:
 
 ```text
-ghcr.io/halcycon/shed:1.8.6-guestux.4
+ghcr.io/halcycon/shed:1.8.6-guestux.5
 ```
 
 Branch pushes also publish `ghcr.io/halcycon/shed:guestux` (mutable smoke tag).
 
 ## Arcane deploy / rollback
 
-1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.4` (or newer).
+1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.5` (or newer).
 2. In Arcane, set image to that tag (volumes unchanged).
 3. Rollback: `ghcr.io/muxshed/shed:1.8.6`.
 
