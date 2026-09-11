@@ -2,9 +2,14 @@ name: Docker
 
 on:
   push:
-    branches: [main]
-    tags: ['v*']
+    branches: [main, guestux]
+    tags: ['v*', '*-guestux.*']
   workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Extra image tag to apply (e.g. 1.8.6-guestux.1)'
+        required: false
+        type: string
 
 env:
   REGISTRY: ghcr.io
@@ -36,6 +41,9 @@ jobs:
             type=semver,pattern={{version}}
             type=semver,pattern={{major}}.{{minor}}
             type=semver,pattern={{major}}
+            type=match,pattern=^(\d+\.\d+\.\d+-guestux\.\d+)$,group=1
+            type=match,pattern=^v(\d+\.\d+\.\d+-guestux\.\d+)$,group=1
+            type=raw,value=${{ inputs.tag }},enable=${{ inputs.tag != '' }}
             type=raw,value=latest,enable={{is_default_branch}}
 
       - uses: docker/build-push-action@v6

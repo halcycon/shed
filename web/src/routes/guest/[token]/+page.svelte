@@ -2,6 +2,9 @@
 <script lang="ts">
 	import { onDestroy, onMount } from 'svelte';
 	import { page } from '$app/stores';
+	import { createMicMeter, type MicMeterHandle } from '$lib/audio/mic-meter';
+	import type { EffectsMode } from '$lib/video-effects/background-processor';
+	import { tryCreateBlurProcessor, type MediapipeBlurProcessor } from '$lib/video-effects/mediapipe-segmenter';
 
 	const token = $derived($page.params.token);
 
@@ -9,30 +12,70 @@
 	let mode = $state<Mode>('loading');
 	let guestName = $state('');
 	let message = $state('');
+	let effectsWarning = $state('');
+
+	// Channel branding (Studio → Channel)
+	let channelTitle = $state('');
+	let channelLogoUrl = $state<string | null>(null);
+	let channelAccent = $state<string | null>(null);
 
 	let videoEl = $state<HTMLVideoElement | null>(null);
-	let stream = $state<MediaStream | null>(null);
-	let pc: RTCPeerConnection | null = null;
-	let iceServers: RTCIceServer[] = [{ urls: 'stun:stun.l.google.com:19302' }];
+	/** Hidden element feeding the blur processor (never mirrored). */
+	let processVideoEl = $state<HTMLVideoElement | null>(null);
 
-	// device pickers
+	let iceServers: RTCIceServer[] = [];
+	let pc: RTCPeerConnection | null = null;
+
+	// Explicit media state (SPEC)
+	let rawStream = $state<MediaStream | null>(null);
+	let rawVideoTrack = $state<MediaStreamTrack | null>(null);
+	let microphoneTrack = $state<MediaStreamTrack | null>(null);
+	let effectsMode = $state<EffectsMode>('none');
+	let processor: MediapipeBlurProcessor | null = null;
+	let processedStream = $state<MediaStream | null>(null);
+	let processedVideoTrack = $state<MediaStreamTrack | null>(null);
+	let cameraEnabled = $state(true);
+	let microphoneEnabled = $state(true);
+	let blurAvailable = $state(false);
+
 	let cameras = $state<MediaDeviceInfo[]>([]);
 	let mics = $state<MediaDeviceInfo[]>([]);
 	let camId = $state('');
 	let micId = $state('');
 
-	// Keep the preview wired to the active stream whenever either changes — the
-	// <video> only exists once we're past 'loading', so bind reactively.
+	let micMeter: MicMeterHandle | null = null;
+	let micLevel = $state(0);
+	let meterRaf = 0;
+
+	const brandLabel = $derived(channelTitle.trim() || 'Guest');
+	const accent = $derived(channelAccent || 'var(--color-amber)');
+	const busy = $derived(mode === 'joining');
+
+	/** What the guest is transmitting (and should preview). */
+	const previewStream = $derived.by(() => {
+		if (effectsMode === 'blur' && processedStream) return processedStream;
+		return rawStream;
+	});
+
 	$effect(() => {
-		if (videoEl && stream) videoEl.srcObject = stream;
+		if (videoEl && previewStream) videoEl.srcObject = previewStream;
+	});
+
+	$effect(() => {
+		if (processVideoEl && rawStream) processVideoEl.srcObject = rawStream;
 	});
 
 	onMount(init);
-	onDestroy(teardown);
+	onDestroy(() => {
+		teardownMedia();
+		pc?.close();
+		pc = null;
+	});
 
 	async function init() {
 		mode = 'loading';
 		message = '';
+		effectsWarning = '';
 		try {
 			const res = await fetch(`/api/v1/guest/${token}`);
 			if (!res.ok) {
@@ -41,11 +84,20 @@
 			}
 			const info = await res.json();
 			guestName = info.name ?? 'Guest';
+			channelTitle = info.channel_title ?? '';
+			channelLogoUrl = info.channel_logo_url ?? null;
+			channelAccent = info.channel_accent ?? null;
 			if (Array.isArray(info.ice_servers) && info.ice_servers.length > 0) {
 				iceServers = info.ice_servers;
 			}
-			await openMedia();
+
+			await acquireDevices();
 			await refreshDevices();
+			startMicMeter();
+
+			// Warm blur processor in the background — failure must not block joining.
+			void ensureBlurReady();
+
 			mode = 'ready';
 		} catch (e) {
 			message = e instanceof Error ? e.message : 'Could not access camera or microphone.';
@@ -53,15 +105,47 @@
 		}
 	}
 
-	async function openMedia() {
-		stream?.getTracks().forEach((t) => t.stop());
-		stream = await navigator.mediaDevices.getUserMedia({
+	async function ensureBlurReady(): Promise<boolean> {
+		if (processor) {
+			blurAvailable = true;
+			return true;
+		}
+		const created = await tryCreateBlurProcessor();
+		if (!created) {
+			blurAvailable = false;
+			effectsWarning = 'Background effects are not available in this browser.';
+			return false;
+		}
+		processor = created;
+		blurAvailable = true;
+		return true;
+	}
+
+	async function acquireDevices() {
+		const prevVideo = rawVideoTrack;
+		const prevAudio = microphoneTrack;
+
+		const stream = await navigator.mediaDevices.getUserMedia({
 			video: camId ? { deviceId: { exact: camId } } : true,
 			audio: micId ? { deviceId: { exact: micId } } : true
 		});
-		// remember which devices we actually got
-		camId = stream.getVideoTracks()[0]?.getSettings().deviceId ?? camId;
-		micId = stream.getAudioTracks()[0]?.getSettings().deviceId ?? micId;
+
+		prevVideo?.stop();
+		prevAudio?.stop();
+
+		rawStream = stream;
+		rawVideoTrack = stream.getVideoTracks()[0] ?? null;
+		microphoneTrack = stream.getAudioTracks()[0] ?? null;
+		camId = rawVideoTrack?.getSettings().deviceId ?? camId;
+		micId = microphoneTrack?.getSettings().deviceId ?? micId;
+
+		if (rawVideoTrack) rawVideoTrack.enabled = cameraEnabled;
+		if (microphoneTrack) microphoneTrack.enabled = microphoneEnabled;
+
+		if (import.meta.env.DEV && rawVideoTrack) {
+			const s = rawVideoTrack.getSettings();
+			console.debug('[guestux] camera', s.width, s.height, s.frameRate, rawVideoTrack.id);
+		}
 	}
 
 	async function refreshDevices() {
@@ -70,32 +154,137 @@
 		mics = devs.filter((d) => d.kind === 'audioinput');
 	}
 
-	// Switch input. If already connected, swap the track on the live sender.
+	function startMicMeter() {
+		stopMicMeter();
+		if (!microphoneTrack) return;
+		micMeter = createMicMeter(microphoneTrack);
+		const tick = () => {
+			micLevel = micMeter?.getLevel() ?? 0;
+			meterRaf = requestAnimationFrame(tick);
+		};
+		meterRaf = requestAnimationFrame(tick);
+	}
+
+	function stopMicMeter() {
+		cancelAnimationFrame(meterRaf);
+		meterRaf = 0;
+		micMeter?.destroy();
+		micMeter = null;
+		micLevel = 0;
+	}
+
+	function outboundVideoTrack(): MediaStreamTrack | null {
+		if (effectsMode === 'blur' && processedVideoTrack) return processedVideoTrack;
+		return rawVideoTrack;
+	}
+
+	async function replaceOutgoingVideoTrack(track: MediaStreamTrack | null) {
+		if (!pc || !track) return;
+		const videoSender = pc.getSenders().find((s) => s.track?.kind === 'video');
+		if (videoSender) await videoSender.replaceTrack(track);
+		if (import.meta.env.DEV) {
+			console.debug('[guestux] outbound video track', track.id);
+		}
+	}
+
+	async function replaceOutgoingAudioTrack(track: MediaStreamTrack | null) {
+		if (!pc || !track) return;
+		const audioSender = pc.getSenders().find((s) => s.track?.kind === 'audio');
+		if (audioSender) await audioSender.replaceTrack(track);
+	}
+
+	async function rebuildVideoPipeline() {
+		if (effectsMode !== 'blur') {
+			stopProcessor();
+			await replaceOutgoingVideoTrack(rawVideoTrack);
+			return;
+		}
+
+		const ok = await ensureBlurReady();
+		if (!ok || !processor || !processVideoEl || !rawVideoTrack) {
+			effectsMode = 'none';
+			await replaceOutgoingVideoTrack(rawVideoTrack);
+			return;
+		}
+
+		// Ensure the hidden source element is playing before segmentation.
+		processVideoEl.srcObject = rawStream;
+		await processVideoEl.play().catch(() => {});
+
+		processor.setSource(processVideoEl);
+		processor.start();
+		processedStream = processor.getStream();
+		processedVideoTrack = processor.getTrack();
+		if (processedVideoTrack) {
+			processedVideoTrack.enabled = cameraEnabled;
+		}
+		await replaceOutgoingVideoTrack(processedVideoTrack);
+	}
+
+	function stopProcessor() {
+		processor?.stop();
+		// Keep the processor instance warm; only clear processed track refs.
+		processedVideoTrack = null;
+		processedStream = null;
+	}
+
+	async function setBackgroundMode(next: EffectsMode) {
+		if (next === effectsMode) return;
+		if (next === 'blur' && !blurAvailable) {
+			const ok = await ensureBlurReady();
+			if (!ok) return;
+		}
+		effectsMode = next;
+		await rebuildVideoPipeline();
+	}
+
+	function setCameraEnabled(enabled: boolean) {
+		cameraEnabled = enabled;
+		if (rawVideoTrack) rawVideoTrack.enabled = enabled;
+		if (processedVideoTrack) processedVideoTrack.enabled = enabled;
+	}
+
+	function setMicrophoneEnabled(enabled: boolean) {
+		microphoneEnabled = enabled;
+		if (microphoneTrack) microphoneTrack.enabled = enabled;
+	}
+
 	async function switchDevice() {
 		try {
-			await openMedia();
+			const wasBlur = effectsMode === 'blur';
+			if (wasBlur) stopProcessor();
+
+			await acquireDevices();
+			await refreshDevices();
+			startMicMeter();
+
 			if (pc) {
-				for (const sender of pc.getSenders()) {
-					const next =
-						sender.track?.kind === 'video'
-							? stream?.getVideoTracks()[0]
-							: stream?.getAudioTracks()[0];
-					if (next) await sender.replaceTrack(next);
-				}
+				await replaceOutgoingAudioTrack(microphoneTrack);
+			}
+
+			if (wasBlur) {
+				await rebuildVideoPipeline();
+			} else if (pc) {
+				await replaceOutgoingVideoTrack(rawVideoTrack);
 			}
 		} catch (e) {
 			message = e instanceof Error ? e.message : 'Could not switch device.';
 		}
 	}
 
-	function teardown() {
-		stream?.getTracks().forEach((t) => t.stop());
-		pc?.close();
-		pc = null;
+	function teardownMedia() {
+		stopMicMeter();
+		processor?.destroy();
+		processor = null;
+		processedStream = null;
+		processedVideoTrack = null;
+		rawStream?.getTracks().forEach((t) => t.stop());
+		rawStream = null;
+		rawVideoTrack = null;
+		microphoneTrack = null;
+		blurAvailable = false;
 	}
 
-	// WHIP is non-trickle — resolve once ICE gathering finishes (or a short
-	// timeout) so the offer SDP we POST already contains our candidates.
 	function waitForIceGathering(peer: RTCPeerConnection, timeoutMs = 3000): Promise<void> {
 		if (peer.iceGatheringState === 'complete') return Promise.resolve();
 		return new Promise((resolve) => {
@@ -112,14 +301,15 @@
 		});
 	}
 
-	// WHIP publish: send camera/mic to the studio as a WebRTC source.
 	async function join() {
-		if (!stream) return;
+		const videoTrack = outboundVideoTrack();
+		if (!videoTrack || !microphoneTrack) return;
 		mode = 'joining';
 		message = '';
 		try {
 			pc = new RTCPeerConnection({ iceServers });
-			stream.getTracks().forEach((t) => pc!.addTrack(t, stream!));
+			pc.addTrack(videoTrack, new MediaStream([videoTrack]));
+			pc.addTrack(microphoneTrack, new MediaStream([microphoneTrack]));
 
 			pc.onconnectionstatechange = () => {
 				const s = pc?.connectionState;
@@ -134,9 +324,12 @@
 			};
 
 			await pc.setLocalDescription(await pc.createOffer());
-			// WHIP is non-trickle: wait for ICE gathering so the offer we POST
-			// carries our candidates — otherwise the server has nothing to pair with.
 			await waitForIceGathering(pc);
+
+			if (import.meta.env.DEV && pc.localDescription?.sdp) {
+				const hasOpus = /opus\/48000/i.test(pc.localDescription.sdp);
+				console.debug('[guestux] offer contains Opus:', hasOpus);
+			}
 
 			const res = await fetch(`/api/v1/guest/${token}/whip`, {
 				method: 'POST',
@@ -153,8 +346,11 @@
 			if (!res.ok) throw new Error(`server returned ${res.status}`);
 
 			const answer = await res.text();
+			if (import.meta.env.DEV) {
+				const m = answer.match(/a=rtpmap:(\d+) opus\/48000/i);
+				console.debug('[guestux] answer Opus PT:', m?.[1] ?? 'not found');
+			}
 			await pc.setRemoteDescription({ type: 'answer', sdp: answer });
-			// stays 'joining' until onconnectionstatechange reports 'connected'
 		} catch (e) {
 			message = e instanceof Error ? e.message : 'Could not connect.';
 			mode = 'error';
@@ -168,12 +364,22 @@
 		message = '';
 	}
 
-	const busy = $derived(mode === 'joining');
+	const meterWidth = $derived(Math.round(micLevel * 100));
 </script>
 
 <svelte:head>
-	<title>Join as guest — Muxshed</title>
+	<title>{brandLabel} — Join as guest</title>
 </svelte:head>
+
+<!-- Hidden source for the blur processor (unmirrored). -->
+<!-- svelte-ignore a11y_media_has_caption -->
+<video
+	bind:this={processVideoEl}
+	class="pointer-events-none fixed h-px w-px opacity-0"
+	autoplay
+	playsinline
+	muted
+></video>
 
 <div class="flex min-h-screen flex-col items-center justify-center p-4">
 	{#if mode === 'loading'}
@@ -181,14 +387,22 @@
 	{:else if mode === 'invalid'}
 		<div class="panel w-full max-w-md text-center">
 			<div class="panel__body py-10">
-				<p class="mb-2 text-lg tracking-widest text-amber-bright">◉ MUXSHED</p>
+				<p class="mb-2 text-lg tracking-widest" style="color: {accent}">◉ {brandLabel}</p>
 				<p class="text-sm text-amber-dim">This guest link is invalid or has expired.</p>
 			</div>
 		</div>
 	{:else}
 		<div class="w-full max-w-2xl space-y-4">
-			<header class="flex items-center justify-between">
-				<span class="text-lg tracking-widest text-amber-bright glow">◉ MUXSHED · GUEST</span>
+			<header class="flex items-center justify-between gap-3">
+				<div class="flex min-w-0 items-center gap-3">
+					{#if channelLogoUrl}
+						<img src={channelLogoUrl} alt="" class="h-8 w-8 rounded object-contain" />
+					{/if}
+					<span class="truncate text-lg tracking-widest glow" style="color: {accent}">
+						◉ {brandLabel}
+						<span class="text-amber-muted">· GUEST</span>
+					</span>
+				</div>
 				{#if mode === 'live'}
 					<span class="pill pill--live"><span class="tally">●</span> ON AIR</span>
 				{:else if mode === 'joining'}
@@ -203,10 +417,22 @@
 				style="aspect-ratio: 16 / 9"
 			>
 				<!-- svelte-ignore a11y_media_has_caption -->
-				<video bind:this={videoEl} class="h-full w-full bg-black" autoplay playsinline muted></video>
+				<video
+					bind:this={videoEl}
+					class="h-full w-full bg-black"
+					class:opacity-40={!cameraEnabled}
+					style="transform: scaleX(-1)"
+					autoplay
+					playsinline
+					muted
+				></video>
+				{#if !cameraEnabled}
+					<div class="absolute inset-0 flex items-center justify-center text-sm text-amber-muted">
+						Camera off
+					</div>
+				{/if}
 			</div>
 
-			<!-- device selection -->
 			<div class="grid gap-2 sm:grid-cols-2">
 				<label class="block">
 					<span class="field-label">Camera</span>
@@ -224,6 +450,57 @@
 						{/each}
 					</select>
 				</label>
+			</div>
+
+			<div class="flex flex-wrap items-center gap-2">
+				<span class="field-label mb-0">Background</span>
+				<button
+					type="button"
+					class="btn"
+					class:btn--go={effectsMode === 'none'}
+					onclick={() => setBackgroundMode('none')}
+				>
+					None
+				</button>
+				<button
+					type="button"
+					class="btn"
+					class:btn--go={effectsMode === 'blur'}
+					onclick={() => setBackgroundMode('blur')}
+				>
+					Blur
+				</button>
+				{#if effectsWarning}
+					<span class="text-[12px] text-amber-muted">{effectsWarning}</span>
+				{/if}
+			</div>
+
+			<div class="grid gap-2 sm:grid-cols-2">
+				<button
+					type="button"
+					class="btn w-full"
+					onclick={() => setCameraEnabled(!cameraEnabled)}
+				>
+					Camera: {cameraEnabled ? 'On' : 'Off'}
+				</button>
+				<button
+					type="button"
+					class="btn w-full"
+					onclick={() => setMicrophoneEnabled(!microphoneEnabled)}
+				>
+					Mic: {microphoneEnabled ? 'Unmuted' : 'Muted'}
+				</button>
+			</div>
+
+			<div>
+				<span class="field-label">Mic level</span>
+				<div class="mt-1 h-2 w-full overflow-hidden rounded bg-black/40">
+					<div
+						class="h-full transition-[width] duration-75"
+						class:opacity-40={!microphoneEnabled}
+						style="width: {meterWidth}%; background: {accent}"
+					></div>
+				</div>
 			</div>
 
 			{#if mode === 'ready'}
