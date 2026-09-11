@@ -81,6 +81,9 @@ pub async fn cut(
         method: "cut".to_string(),
     });
 
+    // Refresh HLS with headers for the new source (program_source may lag failover).
+    crate::routes::stream::ensure_channel_hls_for(&state, Some(id)).await;
+
     Ok(StatusCode::OK)
 }
 
@@ -102,6 +105,8 @@ pub async fn auto(
         scene_id: preview_id,
         method: "cut".to_string(),
     });
+
+    crate::routes::stream::ensure_channel_hls_for(&state, Some(preview_id)).await;
 
     Ok(StatusCode::OK)
 }

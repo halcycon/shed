@@ -147,7 +147,7 @@ pub async fn start(
 
     // Start the public Channel HLS output (ffmpeg) if the channel is enabled, so the
     // watch page goes live as soon as the studio goes on air.
-    ensure_channel_hls(&state).await;
+    ensure_channel_hls_for(&state, Some(source_id)).await;
 
     if let Some(scene_id) = saved_config.scene_id {
         let _ = state.pipeline.activate_scene(&scene_id).await;
@@ -181,7 +181,15 @@ pub async fn stop(State(state): State<Arc<AppState>>) -> Result<StatusCode, ApiE
 /// Start or stop the public Channel HLS output to match the channel's `enabled` flag
 /// and whether the studio is currently broadcasting. Safe to call on go-live and
 /// whenever the channel config (enabled/token) changes.
+///
+/// `program_override` — when set (e.g. just after cut / go-live), use this source for
+/// sequence-header priming instead of `program_source`, which may lag the failover
+/// supervisor by a tick.
 pub async fn ensure_channel_hls(state: &Arc<AppState>) {
+    ensure_channel_hls_for(state, None).await;
+}
+
+pub async fn ensure_channel_hls_for(state: &Arc<AppState>, program_override: Option<Uuid>) {
     let row = sqlx::query_as::<_, (i64, String)>("SELECT enabled, token FROM channel WHERE id = 1")
         .fetch_optional(&state.db)
         .await
@@ -197,7 +205,7 @@ pub async fn ensure_channel_hls(state: &Arc<AppState>) {
         Some((enabled, token)) if enabled != 0 && broadcasting => {
             let data_dir = state.config.read().await.data_dir.clone();
             let output_config = load_output_config(state).await;
-            let program_source = *state.program_source.borrow();
+            let program_source = program_override.or_else(|| *state.program_source.borrow());
             let audio_routing = state.audio_routing.borrow().clone();
 
             let seq_headers = match program_source {

@@ -165,6 +165,8 @@
 		streamOffline = false;
 		destroyHls();
 
+		const sameEl = () => videoEl === el;
+
 		const onReady = () => {
 			attaching = false;
 			playing = true;
@@ -172,6 +174,14 @@
 			// Keep polling so a stream restart (offline→live edge) is detected and
 			// triggers a clean re-attach instead of stalling on deleted segments.
 			el.play().catch(() => {});
+			// Playlist can be "live" while ffmpeg is emitting black/empty frames.
+			// If we never get a real frame, tear down and retry on the next poll.
+			window.setTimeout(() => {
+				if (sameEl() && playing && el.videoWidth === 0) {
+					console.warn('[watch] live playlist but no video frame — retrying');
+					handleOffline();
+				}
+			}, 5000);
 		};
 
 		if (Hls.isSupported()) {

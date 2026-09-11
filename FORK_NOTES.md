@@ -64,6 +64,10 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
    Program WHEP.
 5. **Studio WHEP slower than FLV** — monitor path re-encoded to VP8; under live+HLS load it
    lagged and keyframe-stalled. Studio UI reverted to chased WS-FLV (guestux.10).
+6. **Watch ON AIR but black** — Channel HLS dropped live packets after priming a cached
+   keyframe until the *next* IDR, which could leave ffmpeg encoding black while the
+   playlist still updated. Fixed to forward immediately after a successful prime
+   (guestux.11).
 
 ## Studio monitors (guestux.10)
 
@@ -87,14 +91,14 @@ There is no fork product name in the guest UI.
 Prefer immutable tags:
 
 ```text
-ghcr.io/halcycon/shed:1.8.6-guestux.10
+ghcr.io/halcycon/shed:1.8.6-guestux.11
 ```
 
 Branch pushes also publish `ghcr.io/halcycon/shed:guestux` (mutable smoke tag).
 
 ## Arcane deploy / rollback
 
-1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.10` (or newer).
+1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.11` (or newer).
 2. In Arcane, set image to that tag (volumes unchanged).
 3. Rollback: `ghcr.io/muxshed/shed:1.8.6`.
 

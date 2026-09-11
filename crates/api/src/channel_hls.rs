@@ -256,8 +256,22 @@ async fn bootstrap_stdin(
         }
     }
 
-    tracing::info!("channel HLS: waiting for first keyframe");
-    let mut waiting_for_keyframe = true;
+    // If we already primed with a cached IDR, do NOT keep dropping live packets until
+    // the next one — that starved ffmpeg (often → black HLS while the playlist still
+    // updates / "ON AIR"). Match egress: after a successful prime, forward everything.
+    // Only gate when we have no priming keyframe (true mid-GOP join).
+    let primed = sequence_headers
+        .as_ref()
+        .and_then(|s| s.last_keyframe.as_ref())
+        .is_some();
+    let mut waiting_for_keyframe = !primed;
+    if primed {
+        tracing::info!(
+            "channel HLS: primed with cached keyframe; forwarding live stream immediately"
+        );
+    } else {
+        tracing::info!("channel HLS: waiting for first keyframe");
+    }
 
     loop {
         match rx.recv().await {

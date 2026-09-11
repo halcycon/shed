@@ -27,8 +27,9 @@ Scenes
   Single full-frame ──► identity forward (no encode)
 ```
 
-\* H.264 WHIP remux assumes the publisher matches Studio output canvas
-(`OutputConfig` width/height/fps). VP8 guests always normalize to canvas.
+\* WHIP always normalizes to the Studio canvas (H.264+AAC). A short-lived
+  `-c:v copy` experiment for H.264 publishers caused Channel HLS to show black
+  while still marked ON AIR.
 
 ## Studio monitor latency (UI)
 

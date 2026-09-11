@@ -242,6 +242,8 @@ pub async fn activate(
         method: "cut".to_string(),
     });
 
+    crate::routes::stream::ensure_channel_hls_for(&state, Some(scene_uuid)).await;
+
     Ok(StatusCode::OK)
 }
 
