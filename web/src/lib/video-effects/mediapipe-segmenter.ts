@@ -2,7 +2,7 @@
 
 import { FilesetResolver, ImageSegmenter } from '@mediapipe/tasks-vision';
 import type { BackgroundProcessor } from './background-processor';
-import { DEFAULT_BLUR_PX, PROCESS_HEIGHT, SEGMENT_HEIGHT } from './background-processor';
+import { DEFAULT_BLUR_PX, PROCESS_HEIGHT } from './background-processor';
 
 const WASM_BASE = '/mediapipe';
 const MODEL_PATH = '/mediapipe/selfie_segmenter.tflite';
@@ -22,6 +22,8 @@ export class MediapipeBlurProcessor implements BackgroundProcessor {
 	private maskCtx: CanvasRenderingContext2D;
 	private blurCanvas: HTMLCanvasElement;
 	private blurCtx: CanvasRenderingContext2D;
+	private personCanvas: HTMLCanvasElement;
+	private personCtx: CanvasRenderingContext2D;
 	private stream: MediaStream | null = null;
 	private running = false;
 	private destroyed = false;
@@ -35,8 +37,10 @@ export class MediapipeBlurProcessor implements BackgroundProcessor {
 
 	constructor(blurPx = DEFAULT_BLUR_PX) {
 		this.blurPx = blurPx;
+		// Output must support alpha during compositing steps (even if the
+		// captured stream is opaque) — otherwise destination-out becomes black.
 		this.canvas = document.createElement('canvas');
-		const ctx = this.canvas.getContext('2d', { alpha: false });
+		const ctx = this.canvas.getContext('2d', { alpha: true });
 		if (!ctx) throw new Error('2D canvas unavailable');
 		this.ctx = ctx;
 
@@ -49,6 +53,11 @@ export class MediapipeBlurProcessor implements BackgroundProcessor {
 		const blurCtx = this.blurCanvas.getContext('2d', { alpha: false });
 		if (!blurCtx) throw new Error('2D canvas unavailable');
 		this.blurCtx = blurCtx;
+
+		this.personCanvas = document.createElement('canvas');
+		const personCtx = this.personCanvas.getContext('2d', { alpha: true });
+		if (!personCtx) throw new Error('2D canvas unavailable');
+		this.personCtx = personCtx;
 	}
 
 	async initialise(): Promise<void> {
@@ -151,16 +160,11 @@ export class MediapipeBlurProcessor implements BackgroundProcessor {
 			this.canvas.height = outH;
 			this.blurCanvas.width = outW;
 			this.blurCanvas.height = outH;
+			this.personCanvas.width = outW;
+			this.personCanvas.height = outH;
 		}
 
-		const segH = Math.min(SEGMENT_HEIGHT, outH);
-		const segW = Math.max(2, Math.round((outW / outH) * segH));
-		if (this.maskCanvas.width !== segW || this.maskCanvas.height !== segH) {
-			this.maskCanvas.width = segW;
-			this.maskCanvas.height = segH;
-		}
-
-		// Blurred background
+		// Blurred full frame (person + background). Edge bleed from CSS blur is fine.
 		this.blurCtx.filter = `blur(${this.blurPx}px)`;
 		this.blurCtx.drawImage(video, 0, 0, outW, outH);
 		this.blurCtx.filter = 'none';
@@ -175,7 +179,7 @@ export class MediapipeBlurProcessor implements BackgroundProcessor {
 				if (this.destroyed || !this.running) return;
 				const mask = result.confidenceMasks?.[0];
 				if (!mask) {
-					// Fail soft: send unblurred frame rather than freezing.
+					this.ctx.globalCompositeOperation = 'copy';
 					this.ctx.drawImage(video, 0, 0, outW, outH);
 					return;
 				}
@@ -193,27 +197,33 @@ export class MediapipeBlurProcessor implements BackgroundProcessor {
 				}
 				const imageData = this.maskImageData;
 				const data = imageData.data;
-				// Confidence mask: higher = more likely person.
 				const conf = mask.getAsFloat32Array();
+				// Soft alpha from confidence; slight bias so sparse false-positives
+				// don't punch opaque black blobs into the background.
 				for (let i = 0; i < conf.length; i++) {
-					const person = conf[i]! > 0.5 ? 255 : 0;
+					const c = conf[i]!;
+					const a = c < 0.35 ? 0 : c > 0.85 ? 255 : Math.round(((c - 0.35) / 0.5) * 255);
 					const o = i * 4;
 					data[o] = 255;
 					data[o + 1] = 255;
 					data[o + 2] = 255;
-					data[o + 3] = person;
+					data[o + 3] = a;
 				}
 				this.maskCtx.putImageData(imageData, 0, 0);
 				mask.close();
 
-				// Draw blurred bg, then sharp person using mask as alpha.
+				// Person layer = sharp video clipped by mask.
+				this.personCtx.globalCompositeOperation = 'copy';
+				this.personCtx.drawImage(video, 0, 0, outW, outH);
+				this.personCtx.globalCompositeOperation = 'destination-in';
+				this.personCtx.drawImage(this.maskCanvas, 0, 0, outW, outH);
+				this.personCtx.globalCompositeOperation = 'source-over';
+
+				// Output = blurred background + sharp person on top.
 				this.ctx.globalCompositeOperation = 'copy';
 				this.ctx.drawImage(this.blurCanvas, 0, 0, outW, outH);
-				this.ctx.globalCompositeOperation = 'destination-out';
-				this.ctx.drawImage(this.maskCanvas, 0, 0, outW, outH);
-				this.ctx.globalCompositeOperation = 'destination-over';
-				this.ctx.drawImage(video, 0, 0, outW, outH);
 				this.ctx.globalCompositeOperation = 'source-over';
+				this.ctx.drawImage(this.personCanvas, 0, 0, outW, outH);
 
 				this.frameCount++;
 				const elapsed = performance.now() - this.fpsWindowStart;
@@ -228,6 +238,7 @@ export class MediapipeBlurProcessor implements BackgroundProcessor {
 			});
 		} catch (e) {
 			console.warn('[guestux] segmentation frame failed', e);
+			this.ctx.globalCompositeOperation = 'copy';
 			this.ctx.drawImage(video, 0, 0, outW, outH);
 		}
 	}
