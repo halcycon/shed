@@ -28,7 +28,7 @@
 	type Mode = 'connecting' | 'whep' | 'flv';
 	let mode = $state<Mode>('connecting');
 	let videoEl = $state<HTMLVideoElement | null>(null);
-	let whep: WhepHandle | null = null;
+	let whep = $state<WhepHandle | null>(null);
 	let meter: MediaElementMeterHandle | null = null;
 	let meterRaf = 0;
 	let destroyed = false;
