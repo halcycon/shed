@@ -4,6 +4,7 @@
 	 * Programme audio mixer strips: AFV / Independent / Mix, mute, volume, PFL.
 	 */
 	import VideoPreview from './VideoPreview.svelte';
+	import PopoutButton from './PopoutButton.svelte';
 	import { api } from '$lib/api';
 	import type { AudioRouting, Source } from '$lib/types';
 
@@ -17,12 +18,15 @@
 			mix_live_sources: false
 		} as AudioRouting),
 		programAudioLevel = 0,
+		/** Hide when already inside the audio popout window. */
+		showPopout = true,
 		onrouting
 	}: {
 		sources: Source[];
 		programSourceId?: string | null;
 		audioRouting: AudioRouting;
 		programAudioLevel?: number;
+		showPopout?: boolean;
 		onrouting?: (r: AudioRouting) => void;
 	} = $props();
 
@@ -153,7 +157,12 @@
 
 <section class="panel">
 	<header class="panel__head">
-		<span>▮ AUDIO</span>
+		<span class="flex items-center gap-2">
+			▮ AUDIO
+			{#if showPopout}
+				<PopoutButton section="audio" width={480} height={640} />
+			{/if}
+		</span>
 		<div class="flex gap-1">
 			<button
 				type="button"

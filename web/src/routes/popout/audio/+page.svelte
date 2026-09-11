@@ -43,6 +43,7 @@
 		programSourceId={programId}
 		bind:audioRouting
 		programAudioLevel={0}
+		showPopout={false}
 		onrouting={(r) => {
 			audioRouting = r;
 			channel?.postMessage({ type: 'audio_routing', routing: r });
