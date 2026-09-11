@@ -15,6 +15,7 @@
 	import type { StingerConfig, BroadcastConfig, OutputConfig, OutputStats, AudioRouting, Asset } from '$lib/types';
 	import StatusIndicator from '../../components/StatusIndicator.svelte';
 	import VideoPreview from '../../components/VideoPreview.svelte';
+	import ProgramMonitor from '../../components/ProgramMonitor.svelte';
 	import { popout } from '$lib/popout';
 	import PopoutButton from '../../components/PopoutButton.svelte';
 	import { Checkbox } from '$lib/components/ui/checkbox';
@@ -431,8 +432,8 @@
 				</header>
 				{#if programSourceId}
 					{#key programSourceId}
-						<VideoPreview
-							sourceId={programSourceId}
+						<ProgramMonitor
+							fallbackSourceId={programSourceId}
 							active={true}
 							monitorAudio={programMonitorAudio}
 							bind:audioLevel={programAudioLevel}

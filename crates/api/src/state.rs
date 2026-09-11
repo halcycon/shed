@@ -35,6 +35,8 @@ pub struct AppState {
     pub egress: EgressManager,
     /// Public Channel HLS output (ffmpeg) for the watch page
     pub channel_hls: ChannelHls,
+    /// Low-latency Program WHEP monitor hub
+    pub program_whep: Arc<crate::program_whep::ProgramWhep>,
     /// Program output — the channel that egress and preview-program read from
     pub program_tx: broadcast::Sender<Bytes>,
     /// The source actually routed to program. Written by the failover supervisor,

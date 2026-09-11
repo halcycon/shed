@@ -1,7 +1,7 @@
 <!-- Licensed under the GNU Affero General Public License v3.0 — see LICENSE. -->
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
-	import VideoPreview from '../../../components/VideoPreview.svelte';
+	import ProgramMonitor from '../../../components/ProgramMonitor.svelte';
 
 	let sourceId = $state<string | null>(null);
 	let monitorAudio = $state(false);
@@ -37,7 +37,9 @@
 	</header>
 	{#if sourceId}
 		{#key sourceId}
-			<div class="flex-1"><VideoPreview {sourceId} active={true} {monitorAudio} /></div>
+			<div class="flex-1">
+				<ProgramMonitor fallbackSourceId={sourceId} active={true} {monitorAudio} />
+			</div>
 		{/key}
 		<p class="border-t border-border-dim px-3 py-1 text-[11px] text-amber-muted">
 			Monitor Audio is local to this browser only. Prefer headphones to avoid acoustic feedback.

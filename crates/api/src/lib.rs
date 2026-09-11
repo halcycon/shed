@@ -21,6 +21,7 @@ pub mod scene_compositor;
 pub mod schedule_time;
 pub mod scheduler;
 pub mod state;
+pub mod program_whep;
 
 /// Restart the egress with a fresh encoder primed for `source`, when live.
 /// Shared by the failover supervisor and the playout controller.

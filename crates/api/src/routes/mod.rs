@@ -22,6 +22,7 @@ mod stingers;
 pub mod stream;
 mod switching;
 pub mod webrtc_config;
+pub mod whep_program;
 pub mod whip;
 mod ws;
 
@@ -153,6 +154,8 @@ pub fn build_router(
         .route("/audio/unmute/{source_id}", post(audio::unmute_source))
         // Source switching
         .route("/program", get(switching::get_program))
+        .route("/program/whep", post(whep_program::create))
+        .route("/program/whep/{session}", delete(whep_program::teardown))
         .route("/preview/{source_id}", post(switching::set_preview))
         .route("/cut/{source_id}", post(switching::cut))
         .route("/auto", post(switching::auto))

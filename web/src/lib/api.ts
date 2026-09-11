@@ -28,6 +28,8 @@ export function setApiKey(key: string) {
 	localStorage.setItem('muxshed_api_key', key);
 }
 
+export { getSessionToken, getApiKey };
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 	const headers: Record<string, string> = {};
 

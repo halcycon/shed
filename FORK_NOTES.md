@@ -30,17 +30,19 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
 - `crates/api/src/routes/guests.rs` — guest info includes Channel title/logo/accent
 - `SPEC.md` — guest UX requirements
 
-### Studio / Channel fixes (`STRETCH-GOAL.md`)
+### Studio / Channel / latency
 
 - `crates/api/src/channel_hls.rs` — deterministic HLS bootstrap (seq headers + keyframe gate)
 - `crates/api/src/routes/stream.rs` — prime HLS with video+audio headers for the effective programme
 - `crates/api/src/program.rs` — `resolve_program_audio_source` (scenes without AAC → first layer)
 - `crates/api/src/scene_compositor.rs` — video-only scene output (no `anullsrc` silence)
+- `crates/api/src/program_whep.rs` + `routes/whep_program.rs` — **Program WHEP** low-latency monitor
+- `web/src/components/ProgramMonitor.svelte` + `web/src/lib/whep-player.ts` — WHEP with WS-FLV fallback
 - `web/src/routes/(app)/channel/+page.svelte` — remove stale GStreamer wording
 - `web/src/components/VideoPreview.svelte` — optional `monitorAudio` + real analyser levels
-- `web/src/lib/audio/media-element-meter.ts` — Program-monitor Web Audio meter
 - Studio / popout Program: local “Monitor Audio” toggle (headphones recommended)
 - Fake `Math.random()` mixer meters replaced with Program-preview analyser levels
+- `LATENCY-IMPROVEMENTS.md` — roadmap (PR 1 = Program WHEP shipped; later phases not started)
 
 ### Packaging
 
@@ -58,6 +60,20 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
    router picks layer (or independent) audio instead.
 3. **GStreamer copy** — Channel UI still mentioned a GStreamer build; HLS has always been ffmpeg.
 
+## Program WHEP (latency PR 1)
+
+Studio Program monitor can use **WHEP** (`POST /api/v1/program/whep`, auth required):
+
+- Shared ffmpeg: `program_tx` FLV → VP8 + Opus RTP → send-only WebRTC peers
+- UI tries WHEP first; on failure falls back to existing WS-FLV source preview
+- Monitor Audio remains local-only / muted by default
+- Later roadmap items (source WHEP, HW encode, NDI, public WHEP) stay in `LATENCY-IMPROVEMENTS.md` only
+
+### Latency check (manual)
+
+Display a ms stopwatch to a guest camera; photograph guest → Program monitor (WHEP)
+vs prior WS-FLV. Record before/after when convenient.
+
 ## Branding
 
 Guest chrome uses **Studio → Channel** title / logo / accent (same settings as `/watch`).
@@ -68,14 +84,14 @@ There is no fork product name in the guest UI.
 Prefer immutable tags:
 
 ```text
-ghcr.io/halcycon/shed:1.8.6-guestux.5
+ghcr.io/halcycon/shed:1.8.6-guestux.6
 ```
 
 Branch pushes also publish `ghcr.io/halcycon/shed:guestux` (mutable smoke tag).
 
 ## Arcane deploy / rollback
 
-1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.5` (or newer).
+1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.6` (or newer).
 2. In Arcane, set image to that tag (volumes unchanged).
 3. Rollback: `ghcr.io/muxshed/shed:1.8.6`.
 
