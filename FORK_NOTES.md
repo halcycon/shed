@@ -83,3 +83,31 @@ After a successful rebase onto a newer upstream release, retag images as
 
 Model: MediaPipe `selfie_segmenter` (float16), vendored under `web/static/mediapipe/`.
 Processing is entirely in the guest browser; frames are not uploaded to third parties.
+
+## Build / test
+
+### Local frontend check
+
+```sh
+cd web && npm ci && npm run check && npm run build
+```
+
+### Docker image (CI)
+
+Push to `guestux` or tag `1.8.6-guestux.N` — GitHub Actions builds
+`ghcr.io/halcycon/shed:<tag>`.
+
+### Acceptance (Chromium against the live studio)
+
+1. Open `/guest/<token>`; confirm Channel title/logo/accent appear.
+2. Camera preview, camera/mic selectors, mic meter, mute, camera off.
+3. Enable Blur before join — preview shows blurred background; join — producer sees blur.
+4. Join with None, toggle Blur live — no reconnect; producer follows.
+5. With Blur on, switch camera — processed output uses the new camera.
+6. DevTools → Network: capture WHIP SDP offer/answer; confirm answer selects Opus/PT111.
+7. Force blur init failure (block `/mediapipe/`) — warning shown; join still works.
+
+### Opus note
+
+Do not strip G.722 from browser offers. Muxshed registers Opus PT 111; confirm the
+SDP **answer** chooses Opus. Dev builds log offer/answer Opus presence to the console.
