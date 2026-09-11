@@ -43,6 +43,13 @@ pub struct GuestInfo {
     pub status: String,
     /// ICE servers (STUN/TURN) the guest browser should use — matches the peer.
     pub ice_servers: Vec<crate::routes::webrtc_config::IceServer>,
+    /// Studio Channel branding (same settings as the public watch page).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_title: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_logo_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub channel_accent: Option<String>,
 }
 
 // ── Authenticated (operator) ──────────────────────────────────────────────────
@@ -131,10 +138,35 @@ pub async fn public_info(
 
     let ice_servers = crate::routes::webrtc_config::load(&state).await.ice_servers;
 
+    // Channel branding is optional — guest join still works if the channel row is absent.
+    let channel = sqlx::query_as::<_, (String, Option<String>, Option<String>, String)>(
+        "SELECT title, logo_path, accent, token FROM channel WHERE id = 1",
+    )
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
+
+    let (channel_title, channel_logo_url, channel_accent) = match channel {
+        Some((title, logo_path, accent, channel_token)) => {
+            let logo = logo_path.map(|_| format!("/api/v1/public/channel/{}/logo", channel_token));
+            let title = if title.trim().is_empty() {
+                None
+            } else {
+                Some(title)
+            };
+            (title, logo, accent)
+        }
+        None => (None, None, None),
+    };
+
     Ok(Json(GuestInfo {
         name: row.0,
         status: row.1,
         ice_servers,
+        channel_title,
+        channel_logo_url,
+        channel_accent,
     }))
 }
 
