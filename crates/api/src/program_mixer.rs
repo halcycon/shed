@@ -16,7 +16,7 @@ use tokio::sync::watch;
 use uuid::Uuid;
 
 use crate::routes::output::OutputConfig;
-use crate::state::AppState;
+use crate::state::{AppState, AudioDspFilters};
 
 const FLV_TAG_AUDIO: u8 = 8;
 const FLV_TAG_VIDEO: u8 = 9;
@@ -26,6 +26,7 @@ const FLV_TAG_VIDEO: u8 = 9;
 pub struct MixLeg {
     pub source_id: Uuid,
     pub volume: f32,
+    pub filters: AudioDspFilters,
 }
 
 /// Run until `cancel` is true. Writes mixed programme FLV tags to `program_tx`.
@@ -89,31 +90,8 @@ pub async fn run_program_mixer(
         ]);
     }
 
-    // Build volume + amix graph. Input 0 = video source; 1..N = audio legs.
-    let filter = if legs.len() == 1 {
-        format!(
-            "[1:a]volume={:.3},aformat=sample_fmts=fltp:channel_layouts=stereo:sample_rates=48000[aout]",
-            legs[0].volume.clamp(0.0, 2.0)
-        )
-    } else {
-        let mut parts = Vec::new();
-        let mut labels = Vec::new();
-        for (i, leg) in legs.iter().enumerate() {
-            let vol = leg.volume.clamp(0.0, 2.0);
-            let idx = i + 1;
-            let label = format!("a{i}");
-            parts.push(format!(
-                "[{idx}:a]volume={vol:.3},aformat=sample_fmts=fltp:channel_layouts=stereo:sample_rates=48000[{label}]"
-            ));
-            labels.push(format!("[{label}]"));
-        }
-        let n = legs.len();
-        parts.push(format!(
-            "{}amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0[aout]",
-            labels.join("")
-        ));
-        parts.join(";")
-    };
+    // Build per-leg DSP + volume, then amix. Input 0 = video; 1..N = audio legs.
+    let filter = build_mix_filter_graph(&legs);
 
     let ba = format!("{}k", cfg.audio_bitrate_kbps);
     args.extend([
@@ -321,4 +299,43 @@ async fn load_output_config(state: &AppState) -> OutputConfig {
         .flatten()
         .and_then(|(json,)| serde_json::from_str(&json).ok())
         .unwrap_or_default()
+}
+
+fn build_mix_filter_graph(legs: &[MixLeg]) -> String {
+    if legs.len() == 1 {
+        let vol = legs[0].volume.clamp(0.0, 2.0);
+        let mut chain = String::new();
+        if let Some(dsp) = legs[0].filters.to_ffmpeg_chain() {
+            chain.push_str(&dsp);
+            chain.push(',');
+        }
+        chain.push_str(&format!(
+            "volume={vol:.3},aformat=sample_fmts=fltp:channel_layouts=stereo:sample_rates=48000"
+        ));
+        return format!("[1:a]{chain}[aout]");
+    }
+
+    let mut parts = Vec::new();
+    let mut labels = Vec::new();
+    for (i, leg) in legs.iter().enumerate() {
+        let vol = leg.volume.clamp(0.0, 2.0);
+        let idx = i + 1;
+        let label = format!("a{i}");
+        let mut chain = String::new();
+        if let Some(dsp) = leg.filters.to_ffmpeg_chain() {
+            chain.push_str(&dsp);
+            chain.push(',');
+        }
+        chain.push_str(&format!(
+            "volume={vol:.3},aformat=sample_fmts=fltp:channel_layouts=stereo:sample_rates=48000"
+        ));
+        parts.push(format!("[{idx}:a]{chain}[{label}]"));
+        labels.push(format!("[{label}]"));
+    }
+    let n = legs.len();
+    parts.push(format!(
+        "{}amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0[aout]",
+        labels.join("")
+    ));
+    parts.join(";")
 }

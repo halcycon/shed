@@ -1,6 +1,6 @@
 // Licensed under the GNU Affero General Public License v3.0 — see LICENSE.
 
-import type { Source, SourceKind, Destination, DestinationKind, ApiKey, Scene, Layer, LayerFit, RecordingState, StingerConfig, StingerAudio, Guest, BroadcastConfig, OutputConfig, OutputStats, AudioRouting, Asset, AssetFolder, User, ChannelConfig, WebrtcConfig, FailoverConfig, Schedule } from './types';
+import type { Source, SourceKind, Destination, DestinationKind, ApiKey, Scene, Layer, LayerFit, RecordingState, StingerConfig, StingerAudio, Guest, BroadcastConfig, OutputConfig, OutputStats, AudioRouting, AudioAnalyseResult, AudioDspFilters, Asset, AssetFolder, User, ChannelConfig, WebrtcConfig, FailoverConfig, Schedule } from './types';
 
 function getSessionToken(): string {
 	if (typeof window === 'undefined') return '';
@@ -144,6 +144,13 @@ export const api = {
 			body: JSON.stringify({ volume })
 		}),
 	toggleAudioMix: () => request<AudioRouting>('/audio/mix', { method: 'POST' }),
+	analyseSourceAudio: (sourceId: string) =>
+		request<AudioAnalyseResult>(`/audio/analyse/${sourceId}`, { method: 'POST' }),
+	setSourceFilters: (sourceId: string, filters: AudioDspFilters) =>
+		request<AudioRouting>(`/audio/filters/${sourceId}`, {
+			method: 'POST',
+			body: JSON.stringify({ filters })
+		}),
 
 	// Output config/stats
 	getOutputConfig: () => request<OutputConfig>('/output/config'),

@@ -164,3 +164,45 @@ pub async fn set_volume(
     persist_routing(&state, &routing).await;
     Ok(StatusCode::OK)
 }
+
+/// Capture ~12s of a live source and suggest jive-inspired spoken-word DSP.
+pub async fn analyse_source(
+    State(state): State<Arc<AppState>>,
+    Path(source_id): Path<String>,
+) -> Result<Json<crate::audio_analyse::AudioAnalyseResult>, ApiError> {
+    let id: Uuid = source_id
+        .parse()
+        .map_err(|_| MuxshedError::BadRequest("invalid uuid".to_string()))?;
+    let states = state.source_states.read().await;
+    if states.get(&id) != Some(&muxshed_common::SourceState::Live) {
+        return Err(MuxshedError::BadRequest("source is not live".to_string()).into());
+    }
+    drop(states);
+
+    let result = crate::audio_analyse::analyse_source(state.clone(), id)
+        .await
+        .map_err(|e| MuxshedError::BadRequest(e))?;
+    Ok(Json(result))
+}
+
+#[derive(Deserialize)]
+pub struct SetFiltersRequest {
+    pub filters: crate::state::AudioDspFilters,
+}
+
+/// Apply (or clear) DSP filters on a mixer strip.
+pub async fn set_filters(
+    State(state): State<Arc<AppState>>,
+    Path(source_id): Path<String>,
+    Json(body): Json<SetFiltersRequest>,
+) -> Result<Json<AudioRouting>, ApiError> {
+    let id: Uuid = source_id
+        .parse()
+        .map_err(|_| MuxshedError::BadRequest("invalid uuid".to_string()))?;
+    state.audio_routing.send_modify(|routing| {
+        routing.channel_mut(id).filters = body.filters.clone();
+    });
+    let routing = state.audio_routing.borrow().clone();
+    persist_routing(&state, &routing).await;
+    Ok(Json(routing))
+}

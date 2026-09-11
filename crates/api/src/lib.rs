@@ -1,5 +1,6 @@
 // Licensed under the GNU Affero General Public License v3.0 — see LICENSE.
 
+pub mod audio_analyse;
 pub mod auth;
 pub mod channel_hls;
 pub mod openapi;

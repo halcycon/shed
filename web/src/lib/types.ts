@@ -113,10 +113,31 @@ export interface BroadcastConfig {
 	auto_record: boolean;
 }
 
+/** Jive-inspired live DSP suggestion / strip state (analyse → apply). */
+export interface AudioDspFilters {
+	enabled: boolean;
+	highpass_hz: number;
+	denoise: boolean;
+	gate: boolean;
+	compress: boolean;
+	notes?: string[];
+}
+
+export interface AudioAnalyseResult {
+	source_id: string;
+	duration_secs: number;
+	lufs_i: number | null;
+	true_peak_db: number | null;
+	rms_level_db: number | null;
+	suggestion: AudioDspFilters;
+	notes: string[];
+}
+
 export interface AudioChannelState {
 	source_id: string;
 	muted: boolean;
 	volume: number;
+	filters?: AudioDspFilters;
 }
 
 export interface AudioRouting {

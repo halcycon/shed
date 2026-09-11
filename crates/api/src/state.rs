@@ -71,12 +71,67 @@ pub struct SequenceHeaders {
     pub last_keyframe: Option<Bytes>,
 }
 
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+pub struct AudioDspFilters {
+    /// When true, programme mixer inserts these filters before volume/amix.
+    pub enabled: bool,
+    /// High-pass corner in Hz (0 = off). Spoken-word default ~80.
+    pub highpass_hz: f32,
+    /// Light spectral denoise (`afftdn`).
+    pub denoise: bool,
+    /// Mild noise gate for idle noise between phrases.
+    pub gate: bool,
+    /// Gentle spoken-word compressor.
+    pub compress: bool,
+    /// Last analyse notes (informational).
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+impl AudioDspFilters {
+    pub fn is_active(&self) -> bool {
+        self.enabled
+            && (self.highpass_hz > 1.0 || self.denoise || self.gate || self.compress)
+    }
+
+    /// Build an ffmpeg audio filter chain fragment (no surrounding labels).
+    pub fn to_ffmpeg_chain(&self) -> Option<String> {
+        if !self.is_active() {
+            return None;
+        }
+        let mut parts = Vec::new();
+        if self.highpass_hz > 1.0 {
+            parts.push(format!("highpass=f={}", self.highpass_hz.clamp(40.0, 200.0)));
+        }
+        if self.denoise {
+            // Conservative live denoise — not full jive file treatment.
+            parts.push("afftdn=nf=-25:nt=w".into());
+        }
+        if self.gate {
+            parts.push("agate=threshold=0.02:ratio=2:attack=20:release=250".into());
+        }
+        if self.compress {
+            parts.push(
+                "acompressor=threshold=-18dB:ratio=2.5:attack=15:release=200:makeup=1.5".into(),
+            );
+        }
+        if parts.is_empty() {
+            None
+        } else {
+            Some(parts.join(","))
+        }
+    }
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AudioChannelState {
     pub source_id: Uuid,
     pub muted: bool,
-    /// Linear gain 0.0–1.0 applied in the programme audio mixer.
+    /// Linear gain 0.0–2.0 applied in the programme audio mixer.
     pub volume: f32,
+    /// Optional jive-inspired live DSP (analyse → suggest → apply).
+    #[serde(default)]
+    pub filters: AudioDspFilters,
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -110,6 +165,7 @@ impl AudioRouting {
                 source_id,
                 muted: false,
                 volume: 1.0,
+                filters: AudioDspFilters::default(),
             });
         }
     }

@@ -35,6 +35,8 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
 - `PIPELINE.md` — encode vs copy stage map (upstream no-transcode vision)
 - Programme **audio mixer** (AFV / Independent / Mix): mute, volume, multi-source `amix` on bus
 - `crates/api/src/program_mixer.rs` — ffmpeg video-copy + AAC mix → `program_tx`
+- `crates/api/src/audio_analyse.rs` — capture ~12s → ebur128/astats → suggest DSP
+- Mixer strips: **Analyse / Apply / Clear** (jive-inspired HP/denoise/gate/compress on bus)
 - `crates/api/src/egress.rs` — **RTMP `-c copy` by default**; `OutputConfig.transcode_egress` escape hatch
 - `crates/api/src/webrtc_ingest.rs` — H.264 WHIP remux (video copy + Opus→AAC); VP8 normalizes
 - `crates/api/src/scene_compositor.rs` — low-delay flags; identity scene skips compositor encode
@@ -93,14 +95,14 @@ There is no fork product name in the guest UI.
 Prefer immutable tags:
 
 ```text
-ghcr.io/halcycon/shed:1.8.6-guestux.11
+ghcr.io/halcycon/shed:1.8.6-guestux.13
 ```
 
 Branch pushes also publish `ghcr.io/halcycon/shed:guestux` (mutable smoke tag).
 
 ## Arcane deploy / rollback
 
-1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.11` (or newer).
+1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.13` (or newer).
 2. In Arcane, set image to that tag (volumes unchanged).
 3. Rollback: `ghcr.io/muxshed/shed:1.8.6`.
 
@@ -133,6 +135,7 @@ Model: MediaPipe `selfie_segmenter` (float16), vendored under `web/static/mediap
 cd web && npm ci && npm run check && npm run build
 cargo test -p muxshed-api channel_hls --lib
 cargo test -p muxshed-api scene_compositor --lib
+cargo test -p muxshed-api audio_analyse --lib
 ```
 
 ### Acceptance (live studio)
@@ -144,3 +147,5 @@ cargo test -p muxshed-api scene_compositor --lib
 - Go live with RTMP dest → logs show `egress: remux copy`
 - Source grid shows `~2–5s`; Preview/Program show `Monitor FLV` and switch quickly
 - While live + `/watch` open, Program must not feel slower than the grid
+- Audio strip **Analyse** (~12s) → notes + suggestion → **Apply** inserts bus DSP; **Clear DSP** removes it
+- Mix + DSP keeps lips on the Muxshed bus (not offboard)

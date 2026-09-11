@@ -134,6 +134,7 @@ pub async fn resolve_audio_legs(
             legs.push(MixLeg {
                 source_id: id,
                 volume: volume.clamp(0.0, 2.0),
+                filters: ch.map(|c| c.filters.clone()).unwrap_or_default(),
             });
         }
     } else {
@@ -150,6 +151,7 @@ pub async fn resolve_audio_legs(
                 legs.push(MixLeg {
                     source_id: audio_id,
                     volume: volume.clamp(0.0, 2.0),
+                    filters: ch.map(|c| c.filters.clone()).unwrap_or_default(),
                 });
             }
         }
@@ -166,6 +168,9 @@ fn needs_ffmpeg_mixer(routing: &crate::state::AudioRouting, legs: &[MixLeg]) -> 
         return true;
     }
     if legs.len() > 1 {
+        return true;
+    }
+    if legs.iter().any(|l| l.filters.is_active()) {
         return true;
     }
     legs.iter().any(|l| (l.volume - 1.0).abs() > 0.02)
