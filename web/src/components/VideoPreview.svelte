@@ -2,22 +2,41 @@
 <script lang="ts">
 	import { onMount, onDestroy } from 'svelte';
 	import mpegts from 'mpegts.js';
+	import {
+		createMediaElementMeter,
+		type MediaElementMeterHandle
+	} from '$lib/audio/media-element-meter';
 
 	let {
 		sourceId,
 		label = '',
 		active = false,
-		onclick,
+		/** When true, preview audio plays locally (user-gesture toggle). Default muted. */
+		monitorAudio = false,
+		/** Optional bindable 0–1 level from the preview's AnalyserNode. */
+		audioLevel = $bindable(0),
+		onclick
 	}: {
 		sourceId: string;
 		label?: string;
 		active?: boolean;
+		monitorAudio?: boolean;
+		audioLevel?: number;
 		onclick?: () => void;
 	} = $props();
 
 	let videoEl: HTMLVideoElement;
 	let player: mpegts.Player | null = null;
 	let destroyed = false;
+	let meter: MediaElementMeterHandle | null = null;
+	let meterRaf = 0;
+
+	$effect(() => {
+		meter?.setMonitoring(monitorAudio);
+		// Keep the element muted attribute in sync as a safety net; actual
+		// audible path is the Web Audio gain node.
+		if (videoEl) videoEl.muted = !monitorAudio;
+	});
 
 	function createPlayer() {
 		if (!mpegts.isSupported() || destroyed) return;
@@ -29,19 +48,18 @@
 			{
 				type: 'flv',
 				isLive: true,
-				url,
+				url
 			},
 			{
 				enableWorker: false,
 				liveBufferLatencyChasing: true,
 				liveBufferLatencyMaxLatency: 1.5,
-				liveBufferLatencyMinRemain: 0.3,
-			},
+				liveBufferLatencyMinRemain: 0.3
+			}
 		);
 
 		player.on(mpegts.Events.ERROR, () => {
 			destroyPlayer();
-			// Retry after a short delay
 			if (!destroyed) {
 				setTimeout(createPlayer, 2000);
 			}
@@ -50,15 +68,35 @@
 		player.attachMediaElement(videoEl);
 		player.load();
 
-		// Wait for data before playing to avoid play/pause race
 		videoEl.onloadeddata = () => {
 			if (!destroyed && videoEl) {
 				videoEl.play().catch(() => {});
+				ensureMeter();
 			}
 		};
 	}
 
+	function ensureMeter() {
+		if (meter || !videoEl) return;
+		try {
+			meter = createMediaElementMeter(videoEl);
+			meter.setMonitoring(monitorAudio);
+			const tick = () => {
+				audioLevel = meter?.getLevel() ?? 0;
+				meterRaf = requestAnimationFrame(tick);
+			};
+			meterRaf = requestAnimationFrame(tick);
+		} catch (e) {
+			console.warn('[preview] audio meter unavailable', e);
+		}
+	}
+
 	function destroyPlayer() {
+		cancelAnimationFrame(meterRaf);
+		meterRaf = 0;
+		meter?.destroy();
+		meter = null;
+		audioLevel = 0;
 		if (player) {
 			try {
 				player.unload();
@@ -87,12 +125,7 @@
 		: 'border-border hover:border-amber-dim'}"
 	onclick={onclick}
 >
-	<video
-		bind:this={videoEl}
-		class="h-full w-full object-contain"
-		muted
-		playsinline
-	></video>
+	<video bind:this={videoEl} class="h-full w-full object-contain" muted playsinline></video>
 	{#if label}
 		<div
 			class="absolute bottom-0 left-0 right-0 border-t border-border-dim bg-panel-raised px-3 py-1.5"
