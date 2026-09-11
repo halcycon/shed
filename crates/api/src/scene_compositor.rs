@@ -142,6 +142,12 @@ pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Res
     }
 
     let cfg = load_output_config(&state).await;
+
+    // Single full-frame opaque layer: forward the source relay — no extra encode.
+    if layers.len() == 1 && is_identity_layer(&layers[0], cfg.width, cfg.height) {
+        return start_identity_forward(state, scene_id, layers[0].source_id).await;
+    }
+
     let public_tx = state.get_or_create_media_relay(scene_id).await;
 
     // One TCP listener per layer — ffmpeg connects to each as an input.
@@ -159,6 +165,10 @@ pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Res
         "-hide_banner".into(),
         "-loglevel".into(),
         "warning".into(),
+        "-fflags".into(),
+        "nobuffer+genpts".into(),
+        "-flags".into(),
+        "low_delay".into(),
     ];
     for p in &ports {
         // Bound input probing. A near-static layer (e.g. a still image) has such
@@ -166,6 +176,8 @@ pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Res
         // satisfied, so the input never finishes opening and the whole graph
         // stalls with no output. The primed sequence header gives codec params
         // immediately, so we can analyze briefly and proceed.
+        args.push("-thread_queue_size".into());
+        args.push("64".into());
         args.push("-analyzeduration".into());
         args.push("500000".into());
         args.push("-probesize".into());
@@ -192,9 +204,10 @@ pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Res
     let gop = format!("{}", cfg.fps * 2);
     let fps = format!("{}", cfg.fps);
     for a in [
-        "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-b:v", &bv, "-maxrate",
-        &bv, "-bufsize", &bufsize, "-g", &gop, "-r", &fps, "-pix_fmt", "yuv420p", "-f", "flv",
-        "-flvflags", "no_duration_filesize", "pipe:1",
+        "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-bf", "0",
+        "-b:v", &bv, "-maxrate", &bv, "-bufsize", &bufsize, "-g", &gop, "-r", &fps,
+        "-pix_fmt", "yuv420p", "-muxdelay", "0", "-muxpreload", "0",
+        "-f", "flv", "-flvflags", "no_duration_filesize", "pipe:1",
     ] {
         args.push(a.to_string());
     }
@@ -377,6 +390,9 @@ async fn read_composited_output(
 }
 
 pub async fn stop_scene_compositor(state: &AppState, scene_id: &Uuid) {
+    if let Some(cancel) = state.scene_forward_cancels.write().await.remove(scene_id) {
+        let _ = cancel.send(true);
+    }
     if let Some(mut child) = state.scene_compositors.write().await.remove(scene_id) {
         let _ = child.kill().await;
     }
@@ -386,10 +402,80 @@ pub async fn stop_scene_compositor(state: &AppState, scene_id: &Uuid) {
 
 /// Stop every running scene compositor (e.g. when cutting to a single source).
 pub async fn stop_all_compositors(state: &AppState) {
-    let ids: Vec<Uuid> = state.scene_compositors.read().await.keys().copied().collect();
+    let mut ids: Vec<Uuid> = state.scene_compositors.read().await.keys().copied().collect();
+    ids.extend(state.scene_forward_cancels.read().await.keys().copied());
+    ids.sort();
+    ids.dedup();
     for id in ids {
         stop_scene_compositor(state, &id).await;
     }
+}
+
+/// True when a single layer covers the full canvas with no opacity/crop tricks.
+fn is_identity_layer(layer: &CompLayer, canvas_w: u32, canvas_h: u32) -> bool {
+    layer.x == 0
+        && layer.y == 0
+        && layer.w == canvas_w
+        && layer.h == canvas_h
+        && layer.opacity >= 0.999
+        && matches!(layer.fit, LayerFit::Fill | LayerFit::Cover | LayerFit::Contain)
+}
+
+/// Publish a source's FLV onto the scene relay without an ffmpeg compositor encode.
+async fn start_identity_forward(
+    state: Arc<AppState>,
+    scene_id: Uuid,
+    source_id: Uuid,
+) -> Result<(), String> {
+    let Some(source_tx) = state.get_media_relay(&source_id).await else {
+        return Err("identity scene: source relay missing".to_string());
+    };
+    let public_tx = state.get_or_create_media_relay(scene_id).await;
+    {
+        let headers = state.sequence_headers.read().await;
+        if let Some(h) = headers.get(&source_id) {
+            let mut wh = state.sequence_headers.write().await;
+            wh.insert(scene_id, h.clone());
+        }
+    }
+
+    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+    {
+        let mut map = state.scene_forward_cancels.write().await;
+        if let Some(old) = map.insert(scene_id, cancel_tx) {
+            let _ = old.send(true);
+        }
+    }
+
+    tracing::info!(
+        "scene {}: identity forward (no compositor) from source {}",
+        scene_id, source_id
+    );
+
+    let st = state.clone();
+    tokio::spawn(async move {
+        let mut rx = source_tx.subscribe();
+        loop {
+            tokio::select! {
+                _ = cancel_rx.changed() => {
+                    if *cancel_rx.borrow() { break; }
+                }
+                msg = rx.recv() => {
+                    match msg {
+                        Ok(data) => {
+                            let _ = public_tx.send(data);
+                        }
+                        Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                        Err(_) => break,
+                    }
+                }
+            }
+        }
+        st.scene_forward_cancels.write().await.remove(&scene_id);
+        tracing::info!("scene {}: identity forward stopped", scene_id);
+    });
+
+    Ok(())
 }
 
 async fn load_output_config(state: &AppState) -> OutputConfig {
@@ -412,6 +498,14 @@ mod tests {
 
     fn layer_fit(x: i32, y: i32, w: u32, h: u32, fit: LayerFit) -> CompLayer {
         CompLayer { source_id: Uuid::nil(), x, y, w, h, opacity: 1.0, fit }
+    }
+
+    #[test]
+    fn identity_layer_is_full_frame_opaque() {
+        assert!(is_identity_layer(&layer(0, 0, 1920, 1080, 1.0), 1920, 1080));
+        assert!(!is_identity_layer(&layer(0, 0, 1280, 720, 1.0), 1920, 1080));
+        assert!(!is_identity_layer(&layer(10, 0, 1920, 1080, 1.0), 1920, 1080));
+        assert!(!is_identity_layer(&layer(0, 0, 1920, 1080, 0.5), 1920, 1080));
     }
 
     #[test]

@@ -32,19 +32,23 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
 
 ### Studio / Channel / latency
 
+- `PIPELINE.md` — encode vs copy stage map (upstream no-transcode vision)
+- `crates/api/src/egress.rs` — **RTMP `-c copy` by default**; `OutputConfig.transcode_egress` escape hatch
+- `crates/api/src/webrtc_ingest.rs` — H.264 WHIP remux (video copy + Opus→AAC); VP8 normalizes
+- `crates/api/src/scene_compositor.rs` — low-delay flags; identity scene skips compositor encode
 - `crates/api/src/channel_hls.rs` — deterministic HLS bootstrap (seq headers + keyframe gate)
 - `crates/api/src/routes/stream.rs` — prime HLS with video+audio headers for the effective programme
 - `crates/api/src/program.rs` — `resolve_program_audio_source` (scenes without AAC → first layer)
-- `crates/api/src/scene_compositor.rs` — video-only scene output (no `anullsrc` silence)
-- `crates/api/src/program_whep.rs` + `routes/whep_program.rs` — **Program + source WHEP** hubs
+- `crates/api/src/program_whep.rs` + `routes/whep_program.rs` — Program + source WHEP hubs
 - `web/src/components/WhepMonitor.svelte` + `whep-player.ts` — WHEP with WS-FLV fallback
 - `web/src/components/ProgramMonitor.svelte` — thin Program wrapper around `WhepMonitor`
-- Studio Preview + popout Preview use source WHEP; source **grid thumbnails stay WS-FLV**
+- Studio Preview + popout Preview use source WHEP; **grid stays WS-FLV** with `~2–5s` cue
+- Preview/Program show **Low latency** when WHEP is up
 - `web/src/routes/(app)/channel/+page.svelte` — remove stale GStreamer wording
-- `web/src/components/VideoPreview.svelte` — optional `monitorAudio` + real analyser levels
+- `web/src/components/VideoPreview.svelte` — meters + latency hint
 - Studio / popout Program: local “Monitor Audio” toggle (headphones recommended)
 - Fake `Math.random()` mixer meters replaced with Program-preview analyser levels
-- `LATENCY-IMPROVEMENTS.md` — roadmap (PR 1–2 WHEP shipped; later phases not started)
+- `LATENCY-IMPROVEMENTS.md` — WHEP + no-transcode done; HW / NDI / public WHEP deferred
 
 ### Packaging
 
@@ -61,6 +65,9 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
    scene id, so programme audio was synthetic silence. Scenes are video-only; the program
    router picks layer (or independent) audio instead.
 3. **GStreamer copy** — Channel UI still mentioned a GStreamer build; HLS has always been ffmpeg.
+4. **Egress always transcoded** — contradicted upstream “RTMP forwarded not re-encoded”; default
+   is remux again. Going live used to spin `libx264 -preset medium` per destination and starve
+   Program WHEP.
 
 ## Program + Preview WHEP (latency PR 1–2)
 
@@ -75,12 +82,12 @@ Studio monitors can use **WHEP** (auth required):
 - UI tries WHEP first; on failure falls back to WS-FLV
 - **Only Preview + Program** get WHEP (one encoder per feed). Source grid stays FLV
 - Monitor Audio remains local-only / muted by default
-- Later items (HW encode, NDI, public WHEP) stay in `LATENCY-IMPROVEMENTS.md`
+- Deferred: HW encode, NDI, public WHEP (`PIPELINE.md`)
 
 ### Latency check (manual)
 
 Display a ms stopwatch to a guest camera; photograph guest → Preview / Program (WHEP)
-vs prior WS-FLV. Record before/after when convenient.
+vs prior WS-FLV. Confirm Program WHEP stays snappy **while live** after egress copy.
 
 ## Branding
 
@@ -92,14 +99,14 @@ There is no fork product name in the guest UI.
 Prefer immutable tags:
 
 ```text
-ghcr.io/halcycon/shed:1.8.6-guestux.8
+ghcr.io/halcycon/shed:1.8.6-guestux.9
 ```
 
 Branch pushes also publish `ghcr.io/halcycon/shed:guestux` (mutable smoke tag).
 
 ## Arcane deploy / rollback
 
-1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.8` (or newer).
+1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.9` (or newer).
 2. In Arcane, set image to that tag (volumes unchanged).
 3. Rollback: `ghcr.io/muxshed/shed:1.8.6`.
 
@@ -107,6 +114,7 @@ Branch pushes also publish `ghcr.io/halcycon/shed:guestux` (mutable smoke tag).
 
 Guest green room: https://github.com/muxshed/shed/pull/25 · https://github.com/muxshed/shed/issues/26  
 HLS / scene-audio / monitor fixes are also clean enough to propose upstream separately.
+Egress copy restoration is a strong candidate for upstream.
 
 ## Rebase recipe
 
@@ -130,6 +138,7 @@ Model: MediaPipe `selfie_segmenter` (float16), vendored under `web/static/mediap
 ```sh
 cd web && npm ci && npm run check && npm run build
 cargo test -p muxshed-api channel_hls --lib
+cargo test -p muxshed-api scene_compositor --lib
 ```
 
 ### Acceptance (live studio)
@@ -138,3 +147,5 @@ cargo test -p muxshed-api channel_hls --lib
 - Scene on Program → guest layer audio audible (no silence)
 - Program “Monitor Audio” toggles local speaker only; mixer bars track real levels
 - Guest blur / WHIP / Opus unchanged from prior guestux builds
+- Go live with RTMP dest → logs show `egress: remux copy`; Program WHEP stays usable
+- Source grid shows `~2–5s`; Preview/Program show `Low latency` when WHEP connects

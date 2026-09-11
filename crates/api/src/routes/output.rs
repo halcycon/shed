@@ -15,6 +15,10 @@ pub struct OutputConfig {
     pub width: u32,
     pub height: u32,
     pub fps: u32,
+    /// When true, RTMP egress re-encodes to the output canvas. Default false:
+    /// remux (`-c copy`) to match Muxshed's no-transcode fan-out model.
+    #[serde(default)]
+    pub transcode_egress: bool,
 }
 
 impl Default for OutputConfig {
@@ -25,6 +29,7 @@ impl Default for OutputConfig {
             width: 1920,
             height: 1080,
             fps: 30,
+            transcode_egress: false,
         }
     }
 }

@@ -30,6 +30,8 @@ pub struct AppState {
     pub whip_sessions: RwLock<HashMap<Uuid, Uuid>>,
     /// Scene compositors (ffmpeg) keyed by scene id — composite a scene's layers
     pub scene_compositors: RwLock<HashMap<Uuid, tokio::process::Child>>,
+    /// Cancel signals for identity scene forwarders (single full-frame layer, no ffmpeg)
+    pub scene_forward_cancels: RwLock<HashMap<Uuid, watch::Sender<bool>>>,
     /// Headless Chrome processes for browser sources
     pub browser_sources: RwLock<HashMap<Uuid, tokio::process::Child>>,
     pub egress: EgressManager,

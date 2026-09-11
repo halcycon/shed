@@ -51,6 +51,7 @@ pub async fn start_normalizer(
         "-c:v", "libx264",
         "-preset", "veryfast",
         "-tune", "zerolatency",
+        "-bf", "0",
         "-b:v", &bv,
         "-maxrate", &maxrate,
         "-bufsize", &bufsize,

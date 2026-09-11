@@ -469,43 +469,111 @@ async fn start_ffmpeg(
         .map_err(|e| format!("write sdp: {}", e))?;
     let sdp_arg = sdp_path.to_string_lossy().to_string();
 
-    let vf = format!(
-        "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
-        cfg.width, cfg.height, cfg.width, cfg.height
-    );
-    let bv = format!("{}k", cfg.video_bitrate_kbps);
-    let maxrate = format!("{}k", cfg.video_bitrate_kbps);
-    let bufsize = format!("{}k", cfg.video_bitrate_kbps * 2);
-    let gop = format!("{}", cfg.fps * 2);
-    let fps = format!("{}", cfg.fps);
     let ba = format!("{}k", cfg.audio_bitrate_kbps);
 
-    let args = vec![
-        "-hide_banner",
-        "-loglevel", "warning",
-        "-protocol_whitelist", "file,crypto,data,rtp,udp",
-        "-fflags", "+genpts",
-        "-analyzeduration", "10000000",
-        "-probesize", "10000000",
-        "-i", &sdp_arg,
-        "-vf", &vf,
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-tune", "zerolatency",
-        "-b:v", &bv,
-        "-maxrate", &maxrate,
-        "-bufsize", &bufsize,
-        "-g", &gop,
-        "-r", &fps,
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", &ba,
-        "-ar", "48000",
-        "-ac", "2",
-        "-f", "flv",
-        "-flvflags", "no_duration_filesize",
-        "pipe:1",
-    ];
+    // H.264 WHIP (OBS / hardware): remux video onto the FLV bus (`-c:v copy`) and
+    // only transcode Opus → AAC. Publishers should match Studio output canvas.
+    // VP8 (browser guests) still needs a full normalize encode.
+    let args: Vec<String> = match video {
+        VideoCodec::H264 => {
+            tracing::info!(
+                "ingest {}: H.264 remux (video copy, Opus→AAC) — match output canvas {}",
+                source_id,
+                format!("{}x{}@{}", cfg.width, cfg.height, cfg.fps)
+            );
+            vec![
+                "-hide_banner".into(),
+                "-loglevel".into(),
+                "warning".into(),
+                "-protocol_whitelist".into(),
+                "file,crypto,data,rtp,udp".into(),
+                "-fflags".into(),
+                "+genpts".into(),
+                "-analyzeduration".into(),
+                "10000000".into(),
+                "-probesize".into(),
+                "10000000".into(),
+                "-i".into(),
+                sdp_arg.clone(),
+                "-c:v".into(),
+                "copy".into(),
+                "-c:a".into(),
+                "aac".into(),
+                "-b:a".into(),
+                ba,
+                "-ar".into(),
+                "48000".into(),
+                "-ac".into(),
+                "2".into(),
+                "-f".into(),
+                "flv".into(),
+                "-flvflags".into(),
+                "no_duration_filesize".into(),
+                "pipe:1".into(),
+            ]
+        }
+        VideoCodec::Vp8 => {
+            let vf = format!(
+                "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
+                cfg.width, cfg.height, cfg.width, cfg.height
+            );
+            let bv = format!("{}k", cfg.video_bitrate_kbps);
+            let maxrate = format!("{}k", cfg.video_bitrate_kbps);
+            let bufsize = format!("{}k", cfg.video_bitrate_kbps * 2);
+            let gop = format!("{}", cfg.fps * 2);
+            let fps = format!("{}", cfg.fps);
+            vec![
+                "-hide_banner".into(),
+                "-loglevel".into(),
+                "warning".into(),
+                "-protocol_whitelist".into(),
+                "file,crypto,data,rtp,udp".into(),
+                "-fflags".into(),
+                "+genpts".into(),
+                "-analyzeduration".into(),
+                "10000000".into(),
+                "-probesize".into(),
+                "10000000".into(),
+                "-i".into(),
+                sdp_arg.clone(),
+                "-vf".into(),
+                vf,
+                "-c:v".into(),
+                "libx264".into(),
+                "-preset".into(),
+                "veryfast".into(),
+                "-tune".into(),
+                "zerolatency".into(),
+                "-bf".into(),
+                "0".into(),
+                "-b:v".into(),
+                bv,
+                "-maxrate".into(),
+                maxrate,
+                "-bufsize".into(),
+                bufsize,
+                "-g".into(),
+                gop,
+                "-r".into(),
+                fps,
+                "-pix_fmt".into(),
+                "yuv420p".into(),
+                "-c:a".into(),
+                "aac".into(),
+                "-b:a".into(),
+                ba,
+                "-ar".into(),
+                "48000".into(),
+                "-ac".into(),
+                "2".into(),
+                "-f".into(),
+                "flv".into(),
+                "-flvflags".into(),
+                "no_duration_filesize".into(),
+                "pipe:1".into(),
+            ]
+        }
+    };
 
     tracing::info!(
         "starting ingest ffmpeg for {} ({:?}, video :{}, audio :{})",

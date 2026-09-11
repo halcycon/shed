@@ -15,6 +15,8 @@
 		monitorAudio = false,
 		/** Optional bindable 0–1 level from the preview's AnalyserNode. */
 		audioLevel = $bindable(0),
+		/** Show transport latency cue (grid uses buffered WS-FLV). */
+		latencyHint = 'delayed' as 'delayed' | 'none',
 		onclick
 	}: {
 		sourceId: string;
@@ -22,6 +24,7 @@
 		active?: boolean;
 		monitorAudio?: boolean;
 		audioLevel?: number;
+		latencyHint?: 'delayed' | 'none';
 		onclick?: () => void;
 	} = $props();
 
@@ -126,6 +129,14 @@
 	onclick={onclick}
 >
 	<video bind:this={videoEl} class="h-full w-full object-contain" muted playsinline></video>
+	{#if latencyHint === 'delayed'}
+		<div
+			class="absolute top-2 left-2 rounded-sm border border-border-dim bg-panel-raised/90 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-amber-muted"
+			title="Grid previews use buffered FLV (~2–5s). Use Preview/Program for low-latency switching."
+		>
+			~2–5s
+		</div>
+	{/if}
 	{#if label}
 		<div
 			class="absolute bottom-0 left-0 right-0 border-t border-border-dim bg-panel-raised px-3 py-1.5"

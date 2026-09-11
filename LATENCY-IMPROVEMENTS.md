@@ -932,51 +932,37 @@ Thumbnails stay on WS-FLV (no per-tile encoder). Program + Preview share `WhepMo
 
 ---
 
-## PR 3 — Media Pipeline Audit / Pass-through
+## PR 3 — Media Pipeline Audit / Pass-through — **done (guestux.9)**
 
-Document all encode/decode stages.
-
-Implement obvious safe pass-through/remux opportunities.
-
-Pay particular attention to H.264 WHIP input.
+See `PIPELINE.md`. RTMP egress defaults to `-c copy`. H.264 WHIP remuxes video.
+`OutputConfig.transcode_egress` restores letterbox encode when needed.
 
 ---
 
-## PR 4 — Scene Latency Optimisation
+## PR 4 — Scene Latency Optimisation — **done (guestux.9)**
 
-Tune compositor buffering and codec settings.
-
-Measure changes.
+Compositor low-delay flags + single-layer identity forward (no encode).
 
 ---
 
-## PR 5 — Hardware Encoding
+## PR 5 — Hardware Encoding — **deferred**
 
-Add configurable VAAPI/QSV/NVENC support.
-
-Keep software fallback.
-
----
-
-## PR 6 — Low-latency public WHEP viewer
-
-Add optional small-audience WebRTC viewing.
-
-Keep HLS default.
+Not required for producer snappiness under the no-transcode model. Do not add
+VAAPI/NVENC merely to make grid tiles feel live.
 
 ---
 
-## PR 7 — NDI Bridge Prototype
+## PR 6 — Low-latency public WHEP viewer — **deferred**
 
-Create a standalone NDI receiver -> WHIP/SRT bridge.
-
-Do not modify Muxshed core initially.
+Keep HLS as the public default.
 
 ---
 
-## PR 8 — NDI UI integration
+## PR 7 — NDI Bridge Prototype — **out of scope**
 
-If the bridge works well, expose NDI discovery/configuration through Muxshed or a companion edge UI.
+---
+
+## PR 8 — NDI UI integration — **out of scope**
 
 ---
 

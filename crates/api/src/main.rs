@@ -147,6 +147,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         guest_peers: RwLock::new(std::collections::HashMap::new()),
         whip_sessions: RwLock::new(std::collections::HashMap::new()),
         scene_compositors: RwLock::new(std::collections::HashMap::new()),
+        scene_forward_cancels: RwLock::new(std::collections::HashMap::new()),
         browser_sources: RwLock::new(std::collections::HashMap::new()),
         program_tx,
         program_source: program_source_tx,

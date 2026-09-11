@@ -19,13 +19,16 @@
 		fallbackSourceId = null as string | null,
 		monitorAudio = false,
 		audioLevel = $bindable(0),
-		active = true
+		active = true,
+		/** Badge when WHEP is connected. */
+		showLatencyBadge = true
 	}: {
 		target: WhepTarget;
 		fallbackSourceId?: string | null;
 		monitorAudio?: boolean;
 		audioLevel?: number;
 		active?: boolean;
+		showLatencyBadge?: boolean;
 	} = $props();
 
 	type Mode = 'connecting' | 'whep' | 'flv';
@@ -136,6 +139,14 @@
 			{#if mode === 'connecting'}
 				<div class="absolute inset-0 flex items-center justify-center text-sm text-amber-muted">
 					Connecting low-latency preview…
+				</div>
+			{/if}
+			{#if showLatencyBadge && mode === 'whep'}
+				<div
+					class="absolute top-2 left-2 rounded-sm border border-border-dim bg-panel-raised/90 px-1.5 py-0.5 text-[9px] uppercase tracking-wide text-amber"
+					title="WebRTC (WHEP) monitor — intended for switching decisions."
+				>
+					Low latency
 				</div>
 			{/if}
 			{#if active}

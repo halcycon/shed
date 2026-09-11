@@ -54,7 +54,7 @@ impl EgressManager {
         let Some((destinations, media_tx, output_config)) = params else {
             return;
         };
-        tracing::info!("restarting egress with a fresh encoder (program splice)");
+        tracing::info!("restarting egress (program splice / remux refresh)");
         self.stop().await;
         // Let the old RTMP session fully close before reopening the same stream
         // key (some platforms reject a second publisher on an already-open key).
@@ -111,38 +111,50 @@ impl EgressManager {
                 "-i".to_string(), "pipe:0".to_string(),
             ];
 
-            // Always transcode with fixed output canvas.
-            // Uses scale+pad to letterbox/pillarbox any input resolution onto the output canvas.
-            // This prevents crashes when switching between sources with different resolutions.
-            let cfg = output_config.as_ref().cloned().unwrap_or(crate::routes::output::OutputConfig::default());
-            tracing::info!(
-                "egress: compositing to {}x{}@{}fps {}kbps for {}",
-                cfg.width, cfg.height, cfg.fps, cfg.video_bitrate_kbps, dest.name
-            );
+            let cfg = output_config
+                .as_ref()
+                .cloned()
+                .unwrap_or(crate::routes::output::OutputConfig::default());
 
-            // scale to fit within canvas preserving aspect ratio, then pad to exact canvas size (black bars)
-            let vf = format!(
-                "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
-                cfg.width, cfg.height, cfg.width, cfg.height
-            );
-
-            args.extend([
-                "-vf".to_string(), vf,
-                "-c:v".to_string(), "libx264".to_string(),
-                "-preset".to_string(), "medium".to_string(),
-                "-tune".to_string(), "zerolatency".to_string(),
-                "-b:v".to_string(), format!("{}k", cfg.video_bitrate_kbps),
-                "-maxrate".to_string(), format!("{}k", cfg.video_bitrate_kbps),
-                "-bufsize".to_string(), format!("{}k", cfg.video_bitrate_kbps * 2),
-                "-g".to_string(), format!("{}", cfg.fps * 2),
-                "-r".to_string(), format!("{}", cfg.fps),
-                "-pix_fmt".to_string(), "yuv420p".to_string(),
-                "-c:a".to_string(), "aac".to_string(),
-                "-b:a".to_string(), format!("{}k", cfg.audio_bitrate_kbps),
-                "-ar".to_string(), "48000".to_string(),
-                // Downmix to stereo: the native AAC encoder rejects 5.1/6-channel input.
-                "-ac".to_string(), "2".to_string(),
-            ]);
+            // Upstream vision: RTMP fan-out is forwarded (not re-encoded). Ingest /
+            // scene paths already normalize to the output canvas, so the program bus
+            // is H.264+AAC FLV — remux with -c copy. Opt into transcode only when
+            // operators set OutputConfig.transcode_egress (mixed sizes / letterbox).
+            if cfg.transcode_egress {
+                tracing::info!(
+                    "egress: transcoding to {}x{}@{}fps {}kbps for {} (transcode_egress=true)",
+                    cfg.width, cfg.height, cfg.fps, cfg.video_bitrate_kbps, dest.name
+                );
+                let vf = format!(
+                    "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
+                    cfg.width, cfg.height, cfg.width, cfg.height
+                );
+                args.extend([
+                    "-vf".to_string(), vf,
+                    "-c:v".to_string(), "libx264".to_string(),
+                    "-preset".to_string(), "veryfast".to_string(),
+                    "-tune".to_string(), "zerolatency".to_string(),
+                    "-bf".to_string(), "0".to_string(),
+                    "-b:v".to_string(), format!("{}k", cfg.video_bitrate_kbps),
+                    "-maxrate".to_string(), format!("{}k", cfg.video_bitrate_kbps),
+                    "-bufsize".to_string(), format!("{}k", cfg.video_bitrate_kbps * 2),
+                    "-g".to_string(), format!("{}", cfg.fps * 2),
+                    "-r".to_string(), format!("{}", cfg.fps),
+                    "-pix_fmt".to_string(), "yuv420p".to_string(),
+                    "-c:a".to_string(), "aac".to_string(),
+                    "-b:a".to_string(), format!("{}k", cfg.audio_bitrate_kbps),
+                    "-ar".to_string(), "48000".to_string(),
+                    "-ac".to_string(), "2".to_string(),
+                ]);
+            } else {
+                tracing::info!(
+                    "egress: remux copy (no transcode) → {} for {}",
+                    rtmp_url, dest.name
+                );
+                args.extend([
+                    "-c".to_string(), "copy".to_string(),
+                ]);
+            }
 
             args.extend([
                 "-f".to_string(), "flv".to_string(),
