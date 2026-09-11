@@ -1,9 +1,10 @@
 // Licensed under the GNU Affero General Public License v3.0 — see LICENSE.
 
 use bytes::Bytes;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{broadcast, Mutex};
@@ -11,6 +12,25 @@ use tokio::sync::{broadcast, Mutex};
 use crate::routes::output::OutputConfig;
 use crate::rtmp::flv;
 use crate::state::SequenceHeaders;
+
+const FLV_TAG_VIDEO: u8 = 9;
+
+fn is_video_keyframe(data: &[u8]) -> bool {
+    if data.len() < 13 || data[0] != FLV_TAG_VIDEO {
+        return false;
+    }
+    let frame_type = data[11] & 0xF0;
+    let is_seq_header = data[12] == 0x00;
+    frame_type == 0x10 && !is_seq_header
+}
+
+fn is_video_sequence_header(data: &[u8]) -> bool {
+    data.len() >= 13 && data[0] == FLV_TAG_VIDEO && data[12] == 0x00
+}
+
+fn is_audio_sequence_header(data: &[u8]) -> bool {
+    data.len() >= 13 && data[0] == 8 && data[12] == 0x00
+}
 
 /// Produces a public HLS rendition of the program output for the Channel watch page.
 ///
@@ -152,43 +172,34 @@ impl ChannelHls {
             });
         }
 
+        let playlist_watch = playlist.clone();
+        tokio::spawn(async move {
+            watch_first_playlist(playlist_watch).await;
+        });
+
+        tracing::info!("channel HLS: subscribing to program stream");
+        let has_video_seq = sequence_headers
+            .as_ref()
+            .and_then(|s| s.video.as_ref())
+            .is_some();
+        let has_audio_seq = sequence_headers
+            .as_ref()
+            .and_then(|s| s.audio.as_ref())
+            .is_some();
+        let has_keyframe = sequence_headers
+            .as_ref()
+            .and_then(|s| s.last_keyframe.as_ref())
+            .is_some();
+        tracing::info!(
+            "channel HLS: video sequence header available: {} / audio: {} / cached keyframe: {}",
+            if has_video_seq { "yes" } else { "no" },
+            if has_audio_seq { "yes" } else { "no" },
+            if has_keyframe { "yes" } else { "no" }
+        );
+
         let mut rx = media_tx.subscribe();
         tokio::spawn(async move {
-            let mut stdin = stdin;
-
-            let header = flv::flv_header();
-            if stdin.write_all(&header).await.is_err() {
-                tracing::error!("channel HLS header write failed");
-                return;
-            }
-
-            if let Some(ref seq) = sequence_headers {
-                if let Some(ref video) = seq.video {
-                    let _ = stdin.write_all(video).await;
-                }
-                if let Some(ref audio) = seq.audio {
-                    let _ = stdin.write_all(audio).await;
-                }
-            }
-
-            loop {
-                match rx.recv().await {
-                    Ok(data) => {
-                        if stdin.write_all(&data).await.is_err() {
-                            tracing::warn!("channel HLS pipe broken");
-                            break;
-                        }
-                    }
-                    Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("channel HLS lagged {} packets", n);
-                        continue;
-                    }
-                    Err(_) => {
-                        tracing::info!("channel HLS program stream closed");
-                        break;
-                    }
-                }
-            }
+            bootstrap_stdin(stdin, &mut rx, sequence_headers).await;
         });
 
         *self.process.lock().await = Some(child);
@@ -196,8 +207,136 @@ impl ChannelHls {
     }
 }
 
+async fn watch_first_playlist(playlist: PathBuf) {
+    let started = Instant::now();
+    loop {
+        if playlist.exists() {
+            tracing::info!(
+                "channel HLS: first playlist created after {} ms",
+                started.elapsed().as_millis()
+            );
+            return;
+        }
+        if started.elapsed().as_secs() >= 60 {
+            tracing::warn!(
+                "channel HLS: playlist still missing after {} ms",
+                started.elapsed().as_millis()
+            );
+            return;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
+
+/// Write FLV header + codec config, then feed program tags starting at a keyframe.
+async fn bootstrap_stdin(
+    mut stdin: tokio::process::ChildStdin,
+    rx: &mut broadcast::Receiver<Bytes>,
+    sequence_headers: Option<SequenceHeaders>,
+) {
+    let started = Instant::now();
+
+    let header = flv::flv_header();
+    if stdin.write_all(&header).await.is_err() {
+        tracing::error!("channel HLS header write failed");
+        return;
+    }
+
+    if let Some(ref seq) = sequence_headers {
+        if let Some(ref video) = seq.video {
+            let _ = stdin.write_all(video).await;
+        }
+        if let Some(ref audio) = seq.audio {
+            let _ = stdin.write_all(audio).await;
+        }
+        // Priming keyframe (same approach as egress/preview) so ffmpeg can decode
+        // immediately even if the next live packets are mid-GOP.
+        if let Some(ref keyframe) = seq.last_keyframe {
+            let _ = stdin.write_all(keyframe).await;
+        }
+    }
+
+    tracing::info!("channel HLS: waiting for first keyframe");
+    let mut waiting_for_keyframe = true;
+
+    loop {
+        match rx.recv().await {
+            Ok(data) => {
+                if waiting_for_keyframe {
+                    // Always accept mid-stream codec config (source switches).
+                    if is_video_sequence_header(&data) || is_audio_sequence_header(&data) {
+                        if stdin.write_all(&data).await.is_err() {
+                            tracing::warn!("channel HLS pipe broken");
+                            break;
+                        }
+                        continue;
+                    }
+                    if data.first() == Some(&FLV_TAG_VIDEO) && is_video_keyframe(&data) {
+                        waiting_for_keyframe = false;
+                        tracing::info!(
+                            "channel HLS: received first keyframe after {} ms",
+                            started.elapsed().as_millis()
+                        );
+                    } else {
+                        // Drop audio/P-frames until we have a clean IDR after headers.
+                        continue;
+                    }
+                } else if is_video_sequence_header(&data) {
+                    // New AVC config mid-stream (source switch) — re-gate until the
+                    // matching keyframe so ffmpeg does not stall on an open GOP.
+                    waiting_for_keyframe = true;
+                    tracing::info!("channel HLS: new video sequence header; waiting for keyframe");
+                    if stdin.write_all(&data).await.is_err() {
+                        tracing::warn!("channel HLS pipe broken");
+                        break;
+                    }
+                    continue;
+                }
+
+                if stdin.write_all(&data).await.is_err() {
+                    tracing::warn!("channel HLS pipe broken");
+                    break;
+                }
+            }
+            Err(broadcast::error::RecvError::Lagged(n)) => {
+                tracing::warn!(
+                    "channel HLS lagged {} packets; waiting for next keyframe",
+                    n
+                );
+                waiting_for_keyframe = true;
+            }
+            Err(_) => {
+                tracing::info!("channel HLS program stream closed");
+                break;
+            }
+        }
+    }
+}
+
 impl Default for ChannelHls {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn video_tag(frame_type: u8, avc_packet_type: u8) -> Bytes {
+        // Minimal FLV video tag layout used by is_video_keyframe / seq checks.
+        let mut buf = vec![0u8; 16];
+        buf[0] = FLV_TAG_VIDEO;
+        buf[11] = frame_type;
+        buf[12] = avc_packet_type;
+        Bytes::from(buf)
+    }
+
+    #[test]
+    fn detects_keyframe_vs_seq_header() {
+        assert!(is_video_keyframe(&video_tag(0x10, 0x01)));
+        assert!(!is_video_keyframe(&video_tag(0x10, 0x00))); // AVC seq
+        assert!(!is_video_keyframe(&video_tag(0x20, 0x01))); // inter frame
+        assert!(is_video_sequence_header(&video_tag(0x10, 0x00)));
     }
 }

@@ -53,6 +53,52 @@ fn remap_tag(data: &[u8], first_ts: &mut Option<u32>, base_output: u32, output_t
     }
 }
 
+/// Resolve which source should provide programme audio for the given video source.
+///
+/// Independent routing wins when set. Otherwise audio follows video — but if the
+/// video source has no AAC sequence header (e.g. a video-only scene compositor),
+/// fall back to the first scene layer so "Audio Follows Video" is not silence.
+pub async fn resolve_program_audio_source(
+    state: &AppState,
+    video_source_id: Uuid,
+    routing: &crate::state::AudioRouting,
+) -> Uuid {
+    if !routing.audio_follows_video {
+        if let Some(id) = routing.active_audio_source {
+            return id;
+        }
+    }
+
+    {
+        let headers = state.sequence_headers.read().await;
+        if let Some(h) = headers.get(&video_source_id) {
+            if h.audio.is_some() {
+                return video_source_id;
+            }
+        }
+    }
+
+    // Scene layers are ordered by z_index; use the bottom-most live layer as default AFV audio.
+    if let Ok(Some(layer_source)) = sqlx::query_as::<_, (String,)>(
+        "SELECT source_id FROM scene_layers WHERE scene_id = ? ORDER BY z_index ASC LIMIT 1",
+    )
+    .bind(video_source_id.to_string())
+    .fetch_optional(&state.db)
+    .await
+    {
+        if let Ok(id) = Uuid::parse_str(&layer_source.0) {
+            tracing::info!(
+                "program audio: scene {} has no audio — using layer source {}",
+                video_source_id,
+                id
+            );
+            return id;
+        }
+    }
+
+    video_source_id
+}
+
 /// Runs the program router: takes video from program_source, audio from audio routing.
 /// Guarantees a gapless output stream by keeping the old source running until
 /// the new source produces a keyframe.
@@ -73,11 +119,8 @@ pub async fn run_program_router(state: Arc<AppState>) {
         };
 
         let audio_routing = audio_routing_rx.borrow_and_update().clone();
-        let audio_source_id = if audio_routing.audio_follows_video || audio_routing.active_audio_source.is_none() {
-            current_source_id
-        } else {
-            audio_routing.active_audio_source.unwrap_or(current_source_id)
-        };
+        let audio_source_id =
+            resolve_program_audio_source(&state, current_source_id, &audio_routing).await;
 
         let same_source = current_source_id == audio_source_id;
 
@@ -171,11 +214,12 @@ pub async fn run_program_router(state: Arc<AppState>) {
                                     ps.got_keyframe = true;
                                     // Send sequence headers for new source
                                     let new_audio_routing = audio_routing_rx.borrow().clone();
-                                    let new_audio_id = if new_audio_routing.audio_follows_video || new_audio_routing.active_audio_source.is_none() {
-                                        ps.source_id
-                                    } else {
-                                        new_audio_routing.active_audio_source.unwrap_or(ps.source_id)
-                                    };
+                                    let new_audio_id = resolve_program_audio_source(
+                                        &state,
+                                        ps.source_id,
+                                        &new_audio_routing,
+                                    )
+                                    .await;
                                     send_sequence_headers(&state, &ps.source_id, &new_audio_id, output_ts).await;
                                     // Forward the keyframe
                                     let remapped = remap_tag(&data, &mut Some(flv::read_tag_timestamp(&data).unwrap_or(0)), output_ts, &mut output_ts);

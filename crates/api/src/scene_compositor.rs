@@ -175,32 +175,26 @@ pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Res
         args.push("-i".into());
         args.push(format!("tcp://127.0.0.1:{}", p));
     }
-    // Silent audio so the FLV is well-formed; program audio is muxed separately.
-    args.push("-f".into());
-    args.push("lavfi".into());
-    args.push("-i".into());
-    args.push("anullsrc=r=48000:cl=stereo".into());
+    // Video-only scene output. Programme audio is selected by the program router
+    // (Audio Follows Video / independent source) — do not force silence here.
 
     // Build the filter graph: black canvas, then scale + overlay each layer.
     let (filter, final_label) = build_filter_graph(&layers, cfg.width, cfg.height, cfg.fps);
-    let audio_idx = layers.len();
 
     args.push("-filter_complex".into());
     args.push(filter);
     args.push("-map".into());
     args.push(format!("[{}]", final_label));
-    args.push("-map".into());
-    args.push(format!("{}:a", audio_idx));
+    args.push("-an".into());
 
     let bv = format!("{}k", cfg.video_bitrate_kbps);
     let bufsize = format!("{}k", cfg.video_bitrate_kbps * 2);
     let gop = format!("{}", cfg.fps * 2);
     let fps = format!("{}", cfg.fps);
-    let ba = format!("{}k", cfg.audio_bitrate_kbps);
     for a in [
         "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-b:v", &bv, "-maxrate",
-        &bv, "-bufsize", &bufsize, "-g", &gop, "-r", &fps, "-pix_fmt", "yuv420p", "-c:a", "aac",
-        "-b:a", &ba, "-ar", "48000", "-f", "flv", "-flvflags", "no_duration_filesize", "pipe:1",
+        &bv, "-bufsize", &bufsize, "-g", &gop, "-r", &fps, "-pix_fmt", "yuv420p", "-f", "flv",
+        "-flvflags", "no_duration_filesize", "pipe:1",
     ] {
         args.push(a.to_string());
     }

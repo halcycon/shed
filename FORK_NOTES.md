@@ -1,8 +1,7 @@
-# Fork notes — halcycon/shed (guest UX)
+# Fork notes — halcycon/shed (guest UX + studio fixes)
 
-Public fork of [muxshed/shed](https://github.com/muxshed/shed) with a guest “green room”
-(local background blur, device controls, mic meter). Backend/pipeline changes are kept
-minimal so upstream rebases stay straightforward.
+Public fork of [muxshed/shed](https://github.com/muxshed/shed). Backend/pipeline changes
+stay minimal so upstream rebases remain straightforward.
 
 ## Pin point
 
@@ -22,15 +21,40 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
 
 ## Custom surface area
 
-- `web/src/routes/guest/[token]/+page.svelte` — green room UI + track management
-- `web/src/lib/video-effects/` — background processor abstraction + MediaPipe blur
-- `web/src/lib/audio/` — local mic level meter
-- `web/static/mediapipe/` — WASM + selfie segmenter model (served locally)
-- `crates/api/src/routes/guests.rs` — guest info includes Channel title/logo/accent
-- `.github/workflows/docker.yml` — builds `guestux` branch and `*-guestux.*` tags
-- `SPEC.md` — product requirements for this fork
+### Guest green room
 
-Do **not** change source switching, ffmpeg/RTMP/SRT, scenes, auth, or DB schema for guest UX.
+- `web/src/routes/guest/[token]/+page.svelte` — green room UI + track management
+- `web/src/lib/video-effects/` — background processor + MediaPipe blur
+- `web/src/lib/audio/mic-meter.ts` — guest mic meter
+- `web/static/mediapipe/` — WASM + selfie segmenter (served locally)
+- `crates/api/src/routes/guests.rs` — guest info includes Channel title/logo/accent
+- `SPEC.md` — guest UX requirements
+
+### Studio / Channel fixes (`STRETCH-GOAL.md`)
+
+- `crates/api/src/channel_hls.rs` — deterministic HLS bootstrap (seq headers + keyframe gate)
+- `crates/api/src/routes/stream.rs` — prime HLS with video+audio headers for the effective programme
+- `crates/api/src/program.rs` — `resolve_program_audio_source` (scenes without AAC → first layer)
+- `crates/api/src/scene_compositor.rs` — video-only scene output (no `anullsrc` silence)
+- `web/src/routes/(app)/channel/+page.svelte` — remove stale GStreamer wording
+- `web/src/components/VideoPreview.svelte` — optional `monitorAudio` + real analyser levels
+- `web/src/lib/audio/media-element-meter.ts` — Program-monitor Web Audio meter
+- Studio / popout Program: local “Monitor Audio” toggle (headphones recommended)
+- Fake `Math.random()` mixer meters replaced with Program-preview analyser levels
+
+### Packaging
+
+- `.github/workflows/docker.yml` — builds `guestux` branch and `*-guestux.*` tags
+
+## Root causes (stretch fixes)
+
+1. **Slow Channel HLS** — late subscribers to `program_tx` often missed codec config / joined
+   mid-GOP. ChannelHls now primes like egress (seq headers + cached keyframe) and drops
+   packets until the first live keyframe; re-gates after mid-stream AVC config / lag.
+2. **Scene silence** — compositor mapped `anullsrc`, and Audio Follows Video selected the
+   scene id, so programme audio was synthetic silence. Scenes are video-only; the program
+   router picks layer (or independent) audio instead.
+3. **GStreamer copy** — Channel UI still mentioned a GStreamer build; HLS has always been ffmpeg.
 
 ## Branding
 
@@ -42,27 +66,21 @@ There is no fork product name in the guest UI.
 Prefer immutable tags:
 
 ```text
-ghcr.io/halcycon/shed:1.8.6-guestux.2
+ghcr.io/halcycon/shed:1.8.6-guestux.4
 ```
-
-(`1.8.6-guestux.1` is also published; prefer `.2` or newer.)
 
 Branch pushes also publish `ghcr.io/halcycon/shed:guestux` (mutable smoke tag).
 
-Build via GitHub Actions on push to `guestux`, on tags matching `*-guestux.*`, or
-`workflow_dispatch` with an optional tag input.
-
 ## Arcane deploy / rollback
 
-1. Publish / pull `ghcr.io/halcycon/shed:1.8.6-guestux.N` (package must be public, or the
-   host must be authenticated to GHCR).
-2. In Arcane, change only the image:
+1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.4` (or newer).
+2. In Arcane, set image to that tag (volumes unchanged).
+3. Rollback: `ghcr.io/muxshed/shed:1.8.6`.
 
-   - from: `ghcr.io/muxshed/shed:1.8.6`
-   - to:   `ghcr.io/halcycon/shed:1.8.6-guestux.2`
+## Upstream
 
-3. Keep `/config` and `/data` volumes unchanged.
-4. Rollback: set the image back to `ghcr.io/muxshed/shed:1.8.6`.
+Guest green room: https://github.com/muxshed/shed/pull/25 · https://github.com/muxshed/shed/issues/26  
+HLS / scene-audio / monitor fixes are also clean enough to propose upstream separately.
 
 ## Rebase recipe
 
@@ -70,12 +88,8 @@ Build via GitHub Actions on push to `guestux`, on tags matching `*-guestux.*`, o
 git fetch upstream
 git checkout guestux
 git rebase df367af   # or newer upstream tag/commit once verified
-# resolve conflicts — usually only guest page / guests.rs / docker workflow
 git push --force-with-lease origin guestux
 ```
-
-After a successful rebase onto a newer upstream release, retag images as
-`<upstream>-guestux.<n>` (e.g. `1.9.0-guestux.1`).
 
 ## Dependencies added (web)
 
@@ -84,32 +98,17 @@ After a successful rebase onto a newer upstream release, retag images as
 | `@mediapipe/tasks-vision` | Apache-2.0 | On-device person segmentation |
 
 Model: MediaPipe `selfie_segmenter` (float16), vendored under `web/static/mediapipe/`.
-Processing is entirely in the guest browser; frames are not uploaded to third parties.
 
 ## Build / test
 
-### Local frontend check
-
 ```sh
 cd web && npm ci && npm run check && npm run build
+cargo test -p muxshed-api channel_hls --lib
 ```
 
-### Docker image (CI)
+### Acceptance (live studio)
 
-Push to `guestux` or tag `1.8.6-guestux.N` — GitHub Actions builds
-`ghcr.io/halcycon/shed:<tag>`.
-
-### Acceptance (Chromium against the live studio)
-
-1. Open `/guest/<token>`; confirm Channel title/logo/accent appear.
-2. Camera preview, camera/mic selectors, mic meter, mute, camera off.
-3. Enable Blur before join — preview shows blurred background; join — producer sees blur.
-4. Join with None, toggle Blur live — no reconnect; producer follows.
-5. With Blur on, switch camera — processed output uses the new camera.
-6. DevTools → Network: capture WHIP SDP offer/answer; confirm answer selects Opus/PT111.
-7. Force blur init failure (block `/mediapipe/`) — warning shown; join still works.
-
-### Opus note
-
-Do not strip G.722 from browser offers. Muxshed registers Opus PT 111; confirm the
-SDP **answer** chooses Opus. Dev builds log offer/answer Opus presence to the console.
+- Enable Public Channel while already ON AIR → playlist within ~6s
+- Scene on Program → guest layer audio audible (no silence)
+- Program “Monitor Audio” toggles local speaker only; mixer bars track real levels
+- Guest blur / WHIP / Opus unchanged from prior guestux builds

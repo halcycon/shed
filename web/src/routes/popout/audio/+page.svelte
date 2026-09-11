@@ -45,6 +45,17 @@
 		if (audioRouting.audio_follows_video) audioRouting.active_audio_source = null;
 		channel?.postMessage({ type: 'audio_routing', routing: audioRouting });
 	}
+	function meterBarHeight(level: number, index: number, bars = 10): number {
+		const threshold = (index + 1) / bars;
+		if (level >= threshold) return 100;
+		if (level >= threshold - 1 / bars) {
+			return Math.max(12, Math.round(((level - (threshold - 1 / bars)) * bars) * 100));
+		}
+		return 12;
+	}
+
+	// Popout has no Program preview — show a flat active indicator, never Math.random().
+	let activeLevel = $derived(0);
 </script>
 
 <svelte:head><title>Audio - Muxshed</title></svelte:head>
@@ -61,6 +72,9 @@
 		</button>
 	</header>
 	<div class="panel__body space-y-2">
+		<p class="text-[11px] text-amber-muted">
+			Levels update on the main Studio Program monitor. This popout shows routing only.
+		</p>
 		{#each liveSources() as source (source.id)}
 			{@const isActive = audioRouting.audio_follows_video ? source.id === programId : source.id === audioRouting.active_audio_source}
 			<button
@@ -70,9 +84,10 @@
 			>
 				<div class="scanlines-well flex h-6 w-16 items-end gap-px border border-border-dim p-px">
 					{#each Array(10) as _, i}
+						{@const h = isActive ? meterBarHeight(activeLevel, i) : 12}
 						<div
 							class="w-1 {isActive ? (i < 7 ? 'bg-live' : i < 9 ? 'bg-warning' : 'bg-danger') : 'bg-border-dim'}"
-							style="height: {isActive ? Math.max(20, Math.random() * 100) : 12}%"
+							style="height: {h}%"
 						></div>
 					{/each}
 				</div>
