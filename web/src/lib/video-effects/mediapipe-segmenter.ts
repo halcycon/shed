@@ -31,6 +31,7 @@ export class MediapipeBlurProcessor implements BackgroundProcessor {
 	private blurPx: number;
 	private frameCount = 0;
 	private fpsWindowStart = 0;
+	private maskImageData: ImageData | null = null;
 
 	constructor(blurPx = DEFAULT_BLUR_PX) {
 		this.blurPx = blurPx;
@@ -184,9 +185,13 @@ export class MediapipeBlurProcessor implements BackgroundProcessor {
 				if (this.maskCanvas.width !== mw || this.maskCanvas.height !== mh) {
 					this.maskCanvas.width = mw;
 					this.maskCanvas.height = mh;
+					this.maskImageData = null;
 				}
 
-				const imageData = this.maskCtx.createImageData(mw, mh);
+				if (!this.maskImageData || this.maskImageData.width !== mw || this.maskImageData.height !== mh) {
+					this.maskImageData = this.maskCtx.createImageData(mw, mh);
+				}
+				const imageData = this.maskImageData;
 				const data = imageData.data;
 				// Confidence mask: higher = more likely person.
 				const conf = mask.getAsFloat32Array();
