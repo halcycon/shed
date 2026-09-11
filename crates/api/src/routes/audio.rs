@@ -23,14 +23,28 @@ async fn persist_routing(state: &AppState, routing: &AudioRouting) {
 pub async fn get_routing(
     State(state): State<Arc<AppState>>,
 ) -> Result<Json<AudioRouting>, ApiError> {
-    let routing = state.audio_routing.borrow().clone();
+    let mut routing = state.audio_routing.borrow().clone();
+    let live: Vec<Uuid> = state
+        .source_states
+        .read()
+        .await
+        .iter()
+        .filter(|(_, s)| **s == muxshed_common::SourceState::Live)
+        .map(|(id, _)| *id)
+        .collect();
+    for id in live {
+        routing.ensure_channel(id);
+    }
     Ok(Json(routing))
 }
 
 pub async fn set_routing(
     State(state): State<Arc<AppState>>,
-    Json(routing): Json<AudioRouting>,
+    Json(mut routing): Json<AudioRouting>,
 ) -> Result<Json<AudioRouting>, ApiError> {
+    for ch in routing.channels.iter_mut() {
+        ch.volume = ch.volume.clamp(0.0, 2.0);
+    }
     let _ = state.audio_routing.send(routing.clone());
     persist_routing(&state, &routing).await;
     Ok(Json(routing))
@@ -53,8 +67,12 @@ pub async fn set_audio_source(
     }
 
     state.audio_routing.send_modify(|routing| {
+        routing.mix_live_sources = false;
         routing.active_audio_source = body.source_id;
         routing.audio_follows_video = body.source_id.is_none();
+        if let Some(id) = body.source_id {
+            routing.ensure_channel(id);
+        }
     });
 
     let routing = state.audio_routing.borrow().clone();
@@ -66,6 +84,7 @@ pub async fn toggle_follows_video(
     State(state): State<Arc<AppState>>,
 ) -> Result<StatusCode, ApiError> {
     state.audio_routing.send_modify(|routing| {
+        routing.mix_live_sources = false;
         routing.audio_follows_video = !routing.audio_follows_video;
         if routing.audio_follows_video {
             routing.active_audio_source = None;
@@ -77,16 +96,29 @@ pub async fn toggle_follows_video(
     Ok(StatusCode::OK)
 }
 
+pub async fn toggle_mix(
+    State(state): State<Arc<AppState>>,
+) -> Result<Json<AudioRouting>, ApiError> {
+    state.audio_routing.send_modify(|routing| {
+        routing.mix_live_sources = !routing.mix_live_sources;
+        if routing.mix_live_sources {
+            routing.audio_follows_video = false;
+        }
+    });
+    let routing = state.audio_routing.borrow().clone();
+    persist_routing(&state, &routing).await;
+    Ok(Json(routing))
+}
+
 pub async fn mute_source(
     State(state): State<Arc<AppState>>,
     Path(source_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let id: Uuid = source_id.parse()
+    let id: Uuid = source_id
+        .parse()
         .map_err(|_| MuxshedError::BadRequest("invalid uuid".to_string()))?;
     state.audio_routing.send_modify(|routing| {
-        if let Some(ch) = routing.channels.iter_mut().find(|c| c.source_id == id) {
-            ch.muted = true;
-        }
+        routing.channel_mut(id).muted = true;
     });
 
     let routing = state.audio_routing.borrow().clone();
@@ -98,12 +130,34 @@ pub async fn unmute_source(
     State(state): State<Arc<AppState>>,
     Path(source_id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let id: Uuid = source_id.parse()
+    let id: Uuid = source_id
+        .parse()
         .map_err(|_| MuxshedError::BadRequest("invalid uuid".to_string()))?;
     state.audio_routing.send_modify(|routing| {
-        if let Some(ch) = routing.channels.iter_mut().find(|c| c.source_id == id) {
-            ch.muted = false;
-        }
+        routing.channel_mut(id).muted = false;
+    });
+
+    let routing = state.audio_routing.borrow().clone();
+    persist_routing(&state, &routing).await;
+    Ok(StatusCode::OK)
+}
+
+#[derive(Deserialize)]
+pub struct SetVolumeRequest {
+    pub volume: f32,
+}
+
+pub async fn set_volume(
+    State(state): State<Arc<AppState>>,
+    Path(source_id): Path<String>,
+    Json(body): Json<SetVolumeRequest>,
+) -> Result<StatusCode, ApiError> {
+    let id: Uuid = source_id
+        .parse()
+        .map_err(|_| MuxshedError::BadRequest("invalid uuid".to_string()))?;
+    let vol = body.volume.clamp(0.0, 2.0);
+    state.audio_routing.send_modify(|routing| {
+        routing.channel_mut(id).volume = vol;
     });
 
     let routing = state.audio_routing.borrow().clone();

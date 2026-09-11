@@ -152,6 +152,8 @@ pub fn build_router(
         .route("/audio/follows-video", post(audio::toggle_follows_video))
         .route("/audio/mute/{source_id}", post(audio::mute_source))
         .route("/audio/unmute/{source_id}", post(audio::unmute_source))
+        .route("/audio/volume/{source_id}", post(audio::set_volume))
+        .route("/audio/mix", post(audio::toggle_mix))
         // Source switching
         .route("/program", get(switching::get_program))
         .route("/program/whep", post(whep_program::create))

@@ -14,6 +14,7 @@ pub mod source_normalizer;
 pub mod srt;
 pub mod error;
 pub mod program;
+pub mod program_mixer;
 pub mod routes;
 pub mod rtmp;
 pub mod browser_source;

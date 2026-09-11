@@ -123,6 +123,8 @@ export interface AudioRouting {
 	active_audio_source: string | null;
 	channels: AudioChannelState[];
 	audio_follows_video: boolean;
+	/** When true, mix all unmuted live sources into programme audio. */
+	mix_live_sources?: boolean;
 }
 
 export interface Asset {

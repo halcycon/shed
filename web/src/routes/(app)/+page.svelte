@@ -16,6 +16,7 @@
 	import StatusIndicator from '../../components/StatusIndicator.svelte';
 	import VideoPreview from '../../components/VideoPreview.svelte';
 	import ProgramMonitor from '../../components/ProgramMonitor.svelte';
+	import AudioMixerPanel from '../../components/AudioMixerPanel.svelte';
 	import { popout } from '$lib/popout';
 	import PopoutButton from '../../components/PopoutButton.svelte';
 	import { Checkbox } from '$lib/components/ui/checkbox';
@@ -49,6 +50,7 @@
 		active_audio_source: null,
 		channels: [],
 		audio_follows_video: true,
+		mix_live_sources: false
 	});
 
 	/** Local Program-monitor speaker (browser only — does not change AudioRouting). */
@@ -496,7 +498,9 @@
 					<div class="flex justify-between">
 						<span class="text-amber-dim">Audio</span>
 						<span class="text-amber">
-							{#if audioRouting.audio_follows_video}
+							{#if audioRouting.mix_live_sources}
+								Mix (multi-source)
+							{:else if audioRouting.audio_follows_video}
 								Follows video
 							{:else if audioRouting.active_audio_source}
 								{@const audioSrc = $sources.find((s) => s.id === audioRouting.active_audio_source)}
@@ -550,58 +554,19 @@
 		</div>
 
 		<!-- Audio Mixer -->
-		{#if liveSources().length > 0}
-			<section class="panel mb-4">
-				<header class="panel__head">
-					<span class="flex items-center gap-2">
-						▮ AUDIO
-						<PopoutButton section="audio" width={400} height={500} />
-					</span>
-					<button
-						onclick={async () => {
-							try {
-								await api.toggleAudioFollowsVideo();
-								audioRouting.audio_follows_video = !audioRouting.audio_follows_video;
-								if (audioRouting.audio_follows_video) audioRouting.active_audio_source = null;
-							} catch (e) { notify.error(e); }
-						}}
-						class="btn {audioRouting.audio_follows_video ? 'btn--go' : ''}"
-						style="min-height:24px;padding:2px 8px"
-					>
-						{audioRouting.audio_follows_video ? 'Follows Video' : 'Independent'}
-					</button>
-				</header>
-				<div class="panel__body flex gap-3">
-					{#each liveSources() as source (source.id)}
-						{@const isAudioSource = audioRouting.audio_follows_video
-							? source.id === programSourceId
-							: source.id === audioRouting.active_audio_source}
-						<button
-							onclick={() => setAudioSource(source.id)}
-							disabled={audioRouting.audio_follows_video}
-							class="row flex-1 text-left {isAudioSource ? 'border-live' : ''} disabled:cursor-default"
-						>
-							<div class="scanlines-well flex h-5 w-12 items-end gap-px border border-border-dim p-px">
-								{#each Array(8) as _, i}
-									{@const h = isAudioSource ? meterBarHeight(programAudioLevel, i) : 12}
-									<div
-										class="w-1 {isAudioSource ? (i < 6 ? 'bg-live' : i < 7 ? 'bg-warning' : 'bg-danger') : 'bg-border-dim'}"
-										style="height: {h}%"
-									></div>
-								{/each}
-							</div>
-							<div class="min-w-0 flex-1">
-								<div class="truncate {isAudioSource ? 'text-amber-bright' : 'text-amber-dim'}">
-									{source.name}
-								</div>
-							</div>
-							{#if isAudioSource}
-								<span class="pill pill--live shrink-0">● ACTIVE</span>
-							{/if}
-						</button>
-					{/each}
-				</div>
-			</section>
+		{#if liveStreamSources().length > 0}
+			<div class="mb-4">
+				<AudioMixerPanel
+					sources={$sources}
+					{programSourceId}
+					bind:audioRouting
+					{programAudioLevel}
+					onrouting={(r) => {
+						audioRouting = r;
+						studioChannel?.postMessage({ type: 'audio_routing', routing: r });
+					}}
+				/>
+			</div>
 		{/if}
 
 		<!-- Tabbed section: Sources / Library -->

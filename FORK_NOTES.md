@@ -33,6 +33,8 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
 ### Studio / Channel / latency
 
 - `PIPELINE.md` — encode vs copy stage map (upstream no-transcode vision)
+- Programme **audio mixer** (AFV / Independent / Mix): mute, volume, multi-source `amix` on bus
+- `crates/api/src/program_mixer.rs` — ffmpeg video-copy + AAC mix → `program_tx`
 - `crates/api/src/egress.rs` — **RTMP `-c copy` by default**; `OutputConfig.transcode_egress` escape hatch
 - `crates/api/src/webrtc_ingest.rs` — H.264 WHIP remux (video copy + Opus→AAC); VP8 normalizes
 - `crates/api/src/scene_compositor.rs` — low-delay flags; identity scene skips compositor encode

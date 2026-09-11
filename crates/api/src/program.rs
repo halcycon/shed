@@ -1,10 +1,12 @@
 // Licensed under the GNU Affero General Public License v3.0 — see LICENSE.
 
+use crate::program_mixer::MixLeg;
 use crate::rtmp::flv;
 use crate::state::AppState;
 use bytes::Bytes;
+use muxshed_common::SourceState;
 use std::sync::Arc;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, watch};
 use uuid::Uuid;
 
 const FLV_TAG_AUDIO: u8 = 8;
@@ -99,6 +101,76 @@ pub async fn resolve_program_audio_source(
     video_source_id
 }
 
+/// Build the audio legs that should contribute to programme audio.
+pub async fn resolve_audio_legs(
+    state: &AppState,
+    video_source_id: Uuid,
+    routing: &crate::state::AudioRouting,
+) -> Vec<MixLeg> {
+    let headers = state.sequence_headers.read().await;
+    let live: Vec<Uuid> = state
+        .source_states
+        .read()
+        .await
+        .iter()
+        .filter(|(_, s)| **s == SourceState::Live)
+        .map(|(id, _)| *id)
+        .collect();
+
+    let mut legs = Vec::new();
+
+    if routing.mix_live_sources {
+        for id in live {
+            let has_audio = headers.get(&id).and_then(|h| h.audio.as_ref()).is_some();
+            if !has_audio {
+                continue;
+            }
+            let ch = routing.channel(id);
+            let muted = ch.map(|c| c.muted).unwrap_or(false);
+            let volume = ch.map(|c| c.volume).unwrap_or(1.0);
+            if muted || volume < 0.001 {
+                continue;
+            }
+            legs.push(MixLeg {
+                source_id: id,
+                volume: volume.clamp(0.0, 2.0),
+            });
+        }
+    } else {
+        let audio_id = resolve_program_audio_source(state, video_source_id, routing).await;
+        let has_audio = headers
+            .get(&audio_id)
+            .and_then(|h| h.audio.as_ref())
+            .is_some();
+        if has_audio {
+            let ch = routing.channel(audio_id);
+            let muted = ch.map(|c| c.muted).unwrap_or(false);
+            let volume = ch.map(|c| c.volume).unwrap_or(1.0);
+            if !muted && volume >= 0.001 {
+                legs.push(MixLeg {
+                    source_id: audio_id,
+                    volume: volume.clamp(0.0, 2.0),
+                });
+            }
+        }
+    }
+
+    legs
+}
+
+fn needs_ffmpeg_mixer(routing: &crate::state::AudioRouting, legs: &[MixLeg]) -> bool {
+    if legs.is_empty() {
+        return false;
+    }
+    if routing.mix_live_sources {
+        return true;
+    }
+    if legs.len() > 1 {
+        return true;
+    }
+    legs.iter().any(|l| (l.volume - 1.0).abs() > 0.02)
+}
+
 /// Runs the program router: takes video from program_source, audio from audio routing.
 /// Guarantees a gapless output stream by keeping the old source running until
 /// the new source produces a keyframe.
@@ -119,20 +191,69 @@ pub async fn run_program_router(state: Arc<AppState>) {
         };
 
         let audio_routing = audio_routing_rx.borrow_and_update().clone();
-        let audio_source_id =
-            resolve_program_audio_source(&state, current_source_id, &audio_routing).await;
+        let legs = resolve_audio_legs(&state, current_source_id, &audio_routing).await;
 
-        let same_source = current_source_id == audio_source_id;
+        if needs_ffmpeg_mixer(&audio_routing, &legs) {
+            tracing::info!(
+                "program router: mixer mode video={} legs={}",
+                current_source_id,
+                legs.len()
+            );
+            let (cancel_tx, cancel_rx) = watch::channel(false);
+            let st = state.clone();
+            let vid = current_source_id;
+            let legs_c = legs.clone();
+            let join = tokio::spawn(async move {
+                if let Err(e) =
+                    crate::program_mixer::run_program_mixer(st, vid, legs_c, cancel_rx).await
+                {
+                    tracing::warn!("program mixer stopped: {e}");
+                }
+            });
+            tokio::select! {
+                result = source_rx.changed() => {
+                    if result.is_err() {
+                        let _ = cancel_tx.send(true);
+                        let _ = join.await;
+                        return;
+                    }
+                }
+                result = audio_routing_rx.changed() => {
+                    if result.is_err() {
+                        let _ = cancel_tx.send(true);
+                        let _ = join.await;
+                        return;
+                    }
+                }
+            }
+            let _ = cancel_tx.send(true);
+            let _ = join.await;
+            continue;
+        }
+
+        let audio_source_id = legs
+            .first()
+            .map(|l| l.source_id)
+            .unwrap_or(current_source_id);
+        let drop_audio = legs.is_empty();
+        let same_source = current_source_id == audio_source_id && !drop_audio;
 
         tracing::info!(
-            "program router: video={} audio={} (same={})",
-            current_source_id, audio_source_id, same_source
+            "program router: passthrough video={} audio={} (same={} silent={})",
+            current_source_id, audio_source_id, same_source, drop_audio
         );
 
-        send_sequence_headers(&state, &current_source_id, &audio_source_id, output_ts).await;
+        if !drop_audio {
+            send_sequence_headers(&state, &current_source_id, &audio_source_id, output_ts).await;
+        } else if let Some(seq) = state.sequence_headers.read().await.get(&current_source_id) {
+            if let Some(ref video) = seq.video {
+                let remapped = flv::rewrite_tag_timestamp(video, output_ts);
+                let _ = state.program_tx.send(remapped);
+            }
+        }
 
         let video_relay = state.get_media_relay(&current_source_id).await;
-        let audio_relay = if same_source {
+        let audio_relay = if same_source || drop_audio {
             None
         } else {
             state.get_media_relay(&audio_source_id).await
@@ -257,6 +378,11 @@ pub async fn run_program_router(state: Arc<AppState>) {
                             }
 
                             if !got_keyframe && tt == Some(FLV_TAG_AUDIO) && !same_source {
+                                continue;
+                            }
+
+                            // Mute: drop audio tags from the video source.
+                            if drop_audio && tt == Some(FLV_TAG_AUDIO) {
                                 continue;
                             }
 

@@ -138,6 +138,12 @@ export const api = {
 	toggleAudioFollowsVideo: () => request<void>('/audio/follows-video', { method: 'POST' }),
 	muteSource: (sourceId: string) => request<void>(`/audio/mute/${sourceId}`, { method: 'POST' }),
 	unmuteSource: (sourceId: string) => request<void>(`/audio/unmute/${sourceId}`, { method: 'POST' }),
+	setSourceVolume: (sourceId: string, volume: number) =>
+		request<void>(`/audio/volume/${sourceId}`, {
+			method: 'POST',
+			body: JSON.stringify({ volume })
+		}),
+	toggleAudioMix: () => request<AudioRouting>('/audio/mix', { method: 'POST' }),
 
 	// Output config/stats
 	getOutputConfig: () => request<OutputConfig>('/output/config'),

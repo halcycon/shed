@@ -75,17 +75,56 @@ pub struct SequenceHeaders {
 pub struct AudioChannelState {
     pub source_id: Uuid,
     pub muted: bool,
-    pub volume: f32, // 0.0 to 1.0
+    /// Linear gain 0.0–1.0 applied in the programme audio mixer.
+    pub volume: f32,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct AudioRouting {
-    /// Which source provides audio to program. None = follows video source.
+    /// Which source provides audio when not mixing and not following video.
     pub active_audio_source: Option<Uuid>,
-    /// Per-source channel state
+    /// Per-source mute / volume (used by Mix mode and single-source gain).
     pub channels: Vec<AudioChannelState>,
-    /// If true, audio source changes when video source changes
+    /// If true, programme audio follows the Program video source (unless mixing).
     pub audio_follows_video: bool,
+    /// If true, mix all unmuted live sources into programme audio (OBS-like).
+    #[serde(default)]
+    pub mix_live_sources: bool,
+}
+
+impl Default for AudioRouting {
+    fn default() -> Self {
+        Self {
+            active_audio_source: None,
+            channels: Vec::new(),
+            audio_follows_video: true,
+            mix_live_sources: false,
+        }
+    }
+}
+
+impl AudioRouting {
+    pub fn ensure_channel(&mut self, source_id: Uuid) {
+        if !self.channels.iter().any(|c| c.source_id == source_id) {
+            self.channels.push(AudioChannelState {
+                source_id,
+                muted: false,
+                volume: 1.0,
+            });
+        }
+    }
+
+    pub fn channel(&self, source_id: Uuid) -> Option<&AudioChannelState> {
+        self.channels.iter().find(|c| c.source_id == source_id)
+    }
+
+    pub fn channel_mut(&mut self, source_id: Uuid) -> &mut AudioChannelState {
+        self.ensure_channel(source_id);
+        self.channels
+            .iter_mut()
+            .find(|c| c.source_id == source_id)
+            .expect("channel just ensured")
+    }
 }
 
 #[derive(Clone, Debug, Default, serde::Serialize)]
