@@ -135,6 +135,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         egress: EgressManager::new(ws_tx.clone()),
         channel_hls: muxshed_api::channel_hls::ChannelHls::new(),
         program_whep: Arc::new(muxshed_api::program_whep::ProgramWhep::new()),
+        source_whep: Arc::new(muxshed_api::program_whep::SourceWhepRegistry::new()),
         ws_tx,
         source_states: RwLock::new(std::collections::HashMap::new()),
         media_relays: RwLock::new(std::collections::HashMap::new()),

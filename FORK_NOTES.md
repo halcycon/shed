@@ -36,13 +36,15 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
 - `crates/api/src/routes/stream.rs` — prime HLS with video+audio headers for the effective programme
 - `crates/api/src/program.rs` — `resolve_program_audio_source` (scenes without AAC → first layer)
 - `crates/api/src/scene_compositor.rs` — video-only scene output (no `anullsrc` silence)
-- `crates/api/src/program_whep.rs` + `routes/whep_program.rs` — **Program WHEP** low-latency monitor
-- `web/src/components/ProgramMonitor.svelte` + `web/src/lib/whep-player.ts` — WHEP with WS-FLV fallback
+- `crates/api/src/program_whep.rs` + `routes/whep_program.rs` — **Program + source WHEP** hubs
+- `web/src/components/WhepMonitor.svelte` + `whep-player.ts` — WHEP with WS-FLV fallback
+- `web/src/components/ProgramMonitor.svelte` — thin Program wrapper around `WhepMonitor`
+- Studio Preview + popout Preview use source WHEP; source **grid thumbnails stay WS-FLV**
 - `web/src/routes/(app)/channel/+page.svelte` — remove stale GStreamer wording
 - `web/src/components/VideoPreview.svelte` — optional `monitorAudio` + real analyser levels
 - Studio / popout Program: local “Monitor Audio” toggle (headphones recommended)
 - Fake `Math.random()` mixer meters replaced with Program-preview analyser levels
-- `LATENCY-IMPROVEMENTS.md` — roadmap (PR 1 = Program WHEP shipped; later phases not started)
+- `LATENCY-IMPROVEMENTS.md` — roadmap (PR 1–2 WHEP shipped; later phases not started)
 
 ### Packaging
 
@@ -60,18 +62,24 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
    router picks layer (or independent) audio instead.
 3. **GStreamer copy** — Channel UI still mentioned a GStreamer build; HLS has always been ffmpeg.
 
-## Program WHEP (latency PR 1)
+## Program + Preview WHEP (latency PR 1–2)
 
-Studio Program monitor can use **WHEP** (`POST /api/v1/program/whep`, auth required):
+Studio monitors can use **WHEP** (auth required):
 
-- Shared ffmpeg: `program_tx` FLV → VP8 + Opus RTP → send-only WebRTC peers
-- UI tries WHEP first; on failure falls back to existing WS-FLV source preview
+| Feed | Endpoint | Encoder input |
+|------|----------|----------------|
+| Program | `POST /api/v1/program/whep` | `program_tx` FLV |
+| Preview / one source | `POST /api/v1/sources/{id}/whep` | that source’s `media_relays` FLV |
+
+- Shared ffmpeg per active feed: FLV → VP8 + Opus RTP → send-only WebRTC peers
+- UI tries WHEP first; on failure falls back to WS-FLV
+- **Only Preview + Program** get WHEP (one encoder per feed). Source grid stays FLV
 - Monitor Audio remains local-only / muted by default
-- Later roadmap items (source WHEP, HW encode, NDI, public WHEP) stay in `LATENCY-IMPROVEMENTS.md` only
+- Later items (HW encode, NDI, public WHEP) stay in `LATENCY-IMPROVEMENTS.md`
 
 ### Latency check (manual)
 
-Display a ms stopwatch to a guest camera; photograph guest → Program monitor (WHEP)
+Display a ms stopwatch to a guest camera; photograph guest → Preview / Program (WHEP)
 vs prior WS-FLV. Record before/after when convenient.
 
 ## Branding
@@ -84,14 +92,14 @@ There is no fork product name in the guest UI.
 Prefer immutable tags:
 
 ```text
-ghcr.io/halcycon/shed:1.8.6-guestux.7
+ghcr.io/halcycon/shed:1.8.6-guestux.8
 ```
 
 Branch pushes also publish `ghcr.io/halcycon/shed:guestux` (mutable smoke tag).
 
 ## Arcane deploy / rollback
 
-1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.7` (or newer).
+1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.8` (or newer).
 2. In Arcane, set image to that tag (volumes unchanged).
 3. Rollback: `ghcr.io/muxshed/shed:1.8.6`.
 

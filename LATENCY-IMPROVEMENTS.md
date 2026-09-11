@@ -924,11 +924,11 @@ Measure latency.
 
 ---
 
-## PR 2 — Source WebRTC Preview
+## PR 2 — Source WebRTC Preview — **done (guestux.8)**
 
-Extend WHEP playback to selected source/Preview monitor.
+WHEP for Preview / selected source (`POST /api/v1/sources/{id}/whep`).
 
-Avoid automatically creating dozens of peer connections for thumbnails.
+Thumbnails stay on WS-FLV (no per-tile encoder). Program + Preview share `WhepMonitor`.
 
 ---
 

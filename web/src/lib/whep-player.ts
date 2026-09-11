@@ -10,6 +10,10 @@ export type WhepHandle = {
 	close: () => Promise<void>;
 };
 
+export type WhepTarget =
+	| { kind: 'program' }
+	| { kind: 'source'; sourceId: string };
+
 function authHeaders(): HeadersInit {
 	const headers: Record<string, string> = {
 		'Content-Type': 'application/sdp'
@@ -37,11 +41,17 @@ function waitForIceGathering(pc: RTCPeerConnection, timeoutMs = 3000): Promise<v
 	});
 }
 
+function whepUrl(target: WhepTarget): string {
+	if (target.kind === 'program') return '/api/v1/program/whep';
+	return `/api/v1/sources/${target.sourceId}/whep`;
+}
+
 /**
- * Connect a recvonly WebRTC session to Program WHEP.
+ * Connect a recvonly WebRTC session to Program or a single source WHEP feed.
  * Throws on failure — caller should fall back to WS-FLV.
  */
-export async function connectProgramWhep(
+export async function connectWhep(
+	target: WhepTarget,
 	iceServers?: IceServer[]
 ): Promise<WhepHandle> {
 	let servers = iceServers;
@@ -75,7 +85,7 @@ export async function connectProgramWhep(
 	await pc.setLocalDescription(await pc.createOffer());
 	await waitForIceGathering(pc);
 
-	const res = await fetch('/api/v1/program/whep', {
+	const res = await fetch(whepUrl(target), {
 		method: 'POST',
 		headers: authHeaders(),
 		body: pc.localDescription?.sdp ?? ''
@@ -108,4 +118,9 @@ export async function connectProgramWhep(
 			stream.getTracks().forEach((t) => t.stop());
 		}
 	};
+}
+
+/** @deprecated use connectWhep({ kind: 'program' }) */
+export function connectProgramWhep(iceServers?: IceServer[]): Promise<WhepHandle> {
+	return connectWhep({ kind: 'program' }, iceServers);
 }

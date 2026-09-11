@@ -156,6 +156,11 @@ pub fn build_router(
         .route("/program", get(switching::get_program))
         .route("/program/whep", post(whep_program::create))
         .route("/program/whep/{session}", delete(whep_program::teardown))
+        .route("/sources/{id}/whep", post(whep_program::create_source))
+        .route(
+            "/sources/{id}/whep/{session}",
+            delete(whep_program::teardown_source),
+        )
         .route("/preview/{source_id}", post(switching::set_preview))
         .route("/cut/{source_id}", post(switching::cut))
         .route("/auto", post(switching::auto))

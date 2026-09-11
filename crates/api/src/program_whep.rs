@@ -1,10 +1,14 @@
 // Licensed under the GNU Affero General Public License v3.0 — see LICENSE.
 
-//! Low-latency Program monitor via WHEP (WebRTC-HTTP Egress Protocol).
+//! Low-latency studio monitors via WHEP (WebRTC-HTTP Egress Protocol).
 //!
-//! One shared ffmpeg job reads `program_tx` (H.264/AAC FLV), re-encodes to
-//! VP8 + Opus RTP, and fans the RTP into one or more send-only peer connections.
-//! Studio clients POST an SDP offer to `/api/v1/program/whep` and receive an answer.
+//! One ffmpeg encoder per feed (Program bus or a single source relay) reads FLV
+//! tags, re-encodes to VP8 + Opus RTP, and fans into send-only peer connections.
+//!
+//! - `POST /api/v1/program/whep` — Program bus
+//! - `POST /api/v1/sources/{id}/whep` — one source (Preview / selected monitor)
+//!
+//! Source *thumbnails* should stay on WS-FLV to avoid dozens of encoders.
 
 use bytes::{Bytes, BytesMut};
 use std::collections::HashMap;
@@ -69,29 +73,34 @@ struct Session {
     pc: Arc<RTCPeerConnection>,
 }
 
-/// Fan-out WHEP Program monitor hub.
-pub struct ProgramWhep {
+/// One FLV→VP8/Opus WHEP encoder shared by N viewers of the same feed.
+pub struct FlvWhepHub {
+    label: String,
     sessions: Mutex<HashMap<Uuid, Session>>,
     tracks: Mutex<Option<SharedTracks>>,
     encoder: Mutex<Option<Encoder>>,
 }
 
-impl ProgramWhep {
-    pub fn new() -> Self {
+impl FlvWhepHub {
+    pub fn new(label: impl Into<String>) -> Self {
         Self {
+            label: label.into(),
             sessions: Mutex::new(HashMap::new()),
             tracks: Mutex::new(None),
             encoder: Mutex::new(None),
         }
     }
 
-    /// Create a WHEP session from a browser SDP offer; returns (session_id, answer_sdp).
     pub async fn create_session(
         self: &Arc<Self>,
         state: Arc<AppState>,
         offer_sdp: String,
+        media_tx: broadcast::Sender<Bytes>,
+        seq: Option<SequenceHeaders>,
     ) -> Result<(Uuid, String), String> {
-        let tracks = self.ensure_encoder(state.clone()).await?;
+        let tracks = self
+            .ensure_encoder(state.clone(), media_tx, seq)
+            .await?;
 
         let pc = build_send_peer(&state).await?;
         pc.add_track(Arc::clone(&tracks.video) as Arc<dyn TrackLocal + Send + Sync>)
@@ -104,8 +113,10 @@ impl ProgramWhep {
         let session_id = Uuid::new_v4();
         let hub = Arc::clone(self);
         let sid = session_id;
+        let label = self.label.clone();
         pc.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
             let hub = Arc::clone(&hub);
+            let label = label.clone();
             Box::pin(async move {
                 if matches!(
                     s,
@@ -113,7 +124,7 @@ impl ProgramWhep {
                         | RTCPeerConnectionState::Closed
                         | RTCPeerConnectionState::Disconnected
                 ) {
-                    tracing::info!("program WHEP session {} state {:?}", sid, s);
+                    tracing::info!("WHEP [{}] session {} state {:?}", label, sid, s);
                     let _ = hub.delete_session(sid).await;
                 }
             })
@@ -146,7 +157,7 @@ impl ProgramWhep {
                 pc: Arc::clone(&pc),
             },
         );
-        tracing::info!("program WHEP session {} created", session_id);
+        tracing::info!("WHEP [{}] session {} created", self.label, session_id);
         Ok((session_id, local.sdp))
     }
 
@@ -155,7 +166,7 @@ impl ProgramWhep {
         let existed = removed.is_some();
         if let Some(session) = removed {
             let _ = session.pc.close().await;
-            tracing::info!("program WHEP session {} closed", session_id);
+            tracing::info!("WHEP [{}] session {} closed", self.label, session_id);
         }
         if self.sessions.lock().await.is_empty() {
             self.stop_encoder().await;
@@ -163,9 +174,15 @@ impl ProgramWhep {
         existed
     }
 
+    pub async fn session_count(&self) -> usize {
+        self.sessions.lock().await.len()
+    }
+
     async fn ensure_encoder(
         self: &Arc<Self>,
-        state: Arc<AppState>,
+        _state: Arc<AppState>,
+        media_tx: broadcast::Sender<Bytes>,
+        seq: Option<SequenceHeaders>,
     ) -> Result<SharedTracks, String> {
         {
             let tracks = self.tracks.lock().await;
@@ -192,15 +209,10 @@ impl ProgramWhep {
         let audio_sock = UdpSocket::bind("127.0.0.1:0")
             .await
             .map_err(|e| format!("bind audio udp: {e}"))?;
-        let video_port = video_sock
-            .local_addr()
-            .map_err(|e| e.to_string())?
-            .port();
-        let audio_port = audio_sock
-            .local_addr()
-            .map_err(|e| e.to_string())?
-            .port();
+        let video_port = video_sock.local_addr().map_err(|e| e.to_string())?.port();
+        let audio_port = audio_sock.local_addr().map_err(|e| e.to_string())?.port();
 
+        let stream_id = format!("muxshed-{}", self.label);
         let video_track = Arc::new(TrackLocalStaticRTP::new(
             RTCRtpCodecCapability {
                 mime_type: MIME_TYPE_VP8.to_owned(),
@@ -210,7 +222,7 @@ impl ProgramWhep {
                 rtcp_feedback: vec![],
             },
             "video".to_owned(),
-            "muxshed-program".to_owned(),
+            stream_id.clone(),
         ));
         let audio_track = Arc::new(TrackLocalStaticRTP::new(
             RTCRtpCodecCapability {
@@ -221,38 +233,49 @@ impl ProgramWhep {
                 rtcp_feedback: vec![],
             },
             "audio".to_owned(),
-            "muxshed-program".to_owned(),
+            stream_id,
         ));
 
         let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
-        spawn_rtp_pump(video_sock, Arc::clone(&video_track), cancel_rx.clone(), "video");
-        spawn_rtp_pump(audio_sock, Arc::clone(&audio_track), cancel_rx.clone(), "audio");
+        spawn_rtp_pump(
+            video_sock,
+            Arc::clone(&video_track),
+            cancel_rx.clone(),
+            "video",
+        );
+        spawn_rtp_pump(
+            audio_sock,
+            Arc::clone(&audio_track),
+            cancel_rx.clone(),
+            "audio",
+        );
 
-        let seq = current_program_headers(&state).await;
         let mut child = start_monitor_ffmpeg(video_port, audio_port).await?;
         let stdin = child
             .stdin
             .take()
             .ok_or_else(|| "no ffmpeg stdin".to_string())?;
 
-        let program_tx = state.program_tx.clone();
+        let label = self.label.clone();
         let mut cancel_feed = cancel_rx.clone();
         tokio::spawn(async move {
-            feed_program_flv(stdin, program_tx, seq, &mut cancel_feed).await;
+            feed_flv(stdin, media_tx, seq, &mut cancel_feed, &label).await;
         });
 
         if let Some(stderr) = child.stderr.take() {
+            let label = self.label.clone();
             tokio::spawn(async move {
                 use tokio::io::{AsyncBufReadExt, BufReader};
                 let mut lines = BufReader::new(stderr).lines();
                 while let Ok(Some(line)) = lines.next_line().await {
-                    tracing::info!("ffmpeg [program-whep]: {}", line);
+                    tracing::info!("ffmpeg [whep:{}]: {}", label, line);
                 }
             });
         }
 
         tracing::info!(
-            "program WHEP encoder started (VP8 :{}, Opus :{})",
+            "WHEP [{}] encoder started (VP8 :{}, Opus :{})",
+            self.label,
             video_port,
             audio_port
         );
@@ -277,13 +300,105 @@ impl ProgramWhep {
         if let Some(mut enc) = self.encoder.lock().await.take() {
             let _ = enc._cancel.send(true);
             let _ = enc.child.kill().await;
-            tracing::info!("program WHEP encoder stopped");
+            tracing::info!("WHEP [{}] encoder stopped", self.label);
         }
         *self.tracks.lock().await = None;
     }
 }
 
+/// Program-bus WHEP (one shared hub).
+pub struct ProgramWhep {
+    hub: Arc<FlvWhepHub>,
+}
+
+impl ProgramWhep {
+    pub fn new() -> Self {
+        Self {
+            hub: Arc::new(FlvWhepHub::new("program")),
+        }
+    }
+
+    pub async fn create_session(
+        &self,
+        state: Arc<AppState>,
+        offer_sdp: String,
+    ) -> Result<(Uuid, String), String> {
+        let seq = current_program_headers(&state).await;
+        let media_tx = state.program_tx.clone();
+        self.hub
+            .create_session(state, offer_sdp, media_tx, seq)
+            .await
+    }
+
+    pub async fn delete_session(&self, session_id: Uuid) -> bool {
+        self.hub.delete_session(session_id).await
+    }
+}
+
 impl Default for ProgramWhep {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Per-source WHEP hubs (Preview / selected monitors — not thumbnail grids).
+pub struct SourceWhepRegistry {
+    hubs: Mutex<HashMap<Uuid, Arc<FlvWhepHub>>>,
+}
+
+impl SourceWhepRegistry {
+    pub fn new() -> Self {
+        Self {
+            hubs: Mutex::new(HashMap::new()),
+        }
+    }
+
+    pub async fn create_session(
+        &self,
+        state: Arc<AppState>,
+        source_id: Uuid,
+        offer_sdp: String,
+    ) -> Result<(Uuid, String), String> {
+        let media_tx = state
+            .get_media_relay(&source_id)
+            .await
+            .ok_or_else(|| format!("no media relay for source {source_id}"))?;
+
+        let seq = state
+            .sequence_headers
+            .read()
+            .await
+            .get(&source_id)
+            .cloned();
+
+        let hub = {
+            let mut hubs = self.hubs.lock().await;
+            hubs.entry(source_id)
+                .or_insert_with(|| Arc::new(FlvWhepHub::new(format!("source-{source_id}"))))
+                .clone()
+        };
+
+        hub.create_session(state, offer_sdp, media_tx, seq).await
+    }
+
+    pub async fn delete_session(&self, source_id: Uuid, session_id: Uuid) -> bool {
+        let hub = {
+            let hubs = self.hubs.lock().await;
+            hubs.get(&source_id).cloned()
+        };
+        let Some(hub) = hub else {
+            return false;
+        };
+        let ok = hub.delete_session(session_id).await;
+        // Drop idle hubs so we do not leak encoder slots.
+        if hub.session_count().await == 0 {
+            self.hubs.lock().await.remove(&source_id);
+        }
+        ok
+    }
+}
+
+impl Default for SourceWhepRegistry {
     fn default() -> Self {
         Self::new()
     }
@@ -309,16 +424,16 @@ fn spawn_rtp_pump(
                             match Packet::unmarshal(&mut b) {
                                 Ok(pkt) => {
                                     if let Err(e) = track.write_rtp(&pkt).await {
-                                        tracing::debug!("program WHEP {} write_rtp: {}", label, e);
+                                        tracing::debug!("WHEP {} write_rtp: {}", label, e);
                                     }
                                 }
                                 Err(e) => {
-                                    tracing::debug!("program WHEP {} rtp parse: {}", label, e);
+                                    tracing::debug!("WHEP {} rtp parse: {}", label, e);
                                 }
                             }
                         }
                         Err(e) => {
-                            tracing::warn!("program WHEP {} udp recv: {}", label, e);
+                            tracing::warn!("WHEP {} udp recv: {}", label, e);
                             break;
                         }
                     }
@@ -343,7 +458,6 @@ async fn start_monitor_ffmpeg(video_port: u16, audio_port: u16) -> Result<Child,
         "flv".into(),
         "-i".into(),
         "pipe:0".into(),
-        // Video → VP8 RTP (downscale for producer monitor CPU)
         "-map".into(),
         "0:v:0".into(),
         "-vf".into(),
@@ -364,7 +478,6 @@ async fn start_monitor_ffmpeg(video_port: u16, audio_port: u16) -> Result<Child,
         "-f".into(),
         "rtp".into(),
         vurl,
-        // Audio → Opus RTP
         "-map".into(),
         "0:a:0?".into(),
         "-c:a".into(),
@@ -392,19 +505,20 @@ async fn start_monitor_ffmpeg(video_port: u16, audio_port: u16) -> Result<Child,
         .stderr(Stdio::piped())
         .kill_on_drop(true)
         .spawn()
-        .map_err(|e| format!("start program WHEP ffmpeg: {e}"))
+        .map_err(|e| format!("start WHEP ffmpeg: {e}"))
 }
 
 async fn current_program_headers(state: &AppState) -> Option<SequenceHeaders> {
     let program_source = *state.program_source.borrow();
     let audio_routing = state.audio_routing.borrow().clone();
     let Some(video_id) = program_source else {
-        tracing::info!("program WHEP: no program source yet");
+        tracing::info!("WHEP [program]: no program source yet");
         return None;
     };
-    let audio_id = crate::program::resolve_program_audio_source(state, video_id, &audio_routing).await;
+    let audio_id =
+        crate::program::resolve_program_audio_source(state, video_id, &audio_routing).await;
     tracing::info!(
-        "program WHEP: effective program source {} (audio {})",
+        "WHEP [program]: effective source {} (audio {})",
         video_id,
         audio_id
     );
@@ -420,11 +534,12 @@ async fn current_program_headers(state: &AppState) -> Option<SequenceHeaders> {
     })
 }
 
-async fn feed_program_flv(
+async fn feed_flv(
     mut stdin: tokio::process::ChildStdin,
-    program_tx: broadcast::Sender<Bytes>,
+    media_tx: broadcast::Sender<Bytes>,
     sequence_headers: Option<SequenceHeaders>,
     cancel: &mut tokio::sync::watch::Receiver<bool>,
+    label: &str,
 ) {
     let started = Instant::now();
     let header = flv::flv_header();
@@ -443,8 +558,8 @@ async fn feed_program_flv(
         }
     }
 
-    let mut rx = program_tx.subscribe();
-    tracing::info!("program WHEP: waiting for first keyframe");
+    let mut rx = media_tx.subscribe();
+    tracing::info!("WHEP [{}]: waiting for first keyframe", label);
     let mut waiting = true;
 
     loop {
@@ -463,7 +578,8 @@ async fn feed_program_flv(
                             if data.first() == Some(&FLV_TAG_VIDEO) && is_video_keyframe(&data) {
                                 waiting = false;
                                 tracing::info!(
-                                    "program WHEP: first keyframe after {} ms",
+                                    "WHEP [{}]: first keyframe after {} ms",
+                                    label,
                                     started.elapsed().as_millis()
                                 );
                             } else {
@@ -471,14 +587,14 @@ async fn feed_program_flv(
                             }
                         } else if is_video_sequence_header(&data) {
                             waiting = true;
-                            tracing::info!("program WHEP: new video seq header; waiting for keyframe");
+                            tracing::info!("WHEP [{}]: new video seq; waiting for keyframe", label);
                             if stdin.write_all(&data).await.is_err() { break; }
                             continue;
                         }
                         if stdin.write_all(&data).await.is_err() { break; }
                     }
                     Err(broadcast::error::RecvError::Lagged(n)) => {
-                        tracing::warn!("program WHEP lagged {} packets; waiting for keyframe", n);
+                        tracing::warn!("WHEP [{}] lagged {} packets; waiting for keyframe", label, n);
                         waiting = true;
                     }
                     Err(_) => break,

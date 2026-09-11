@@ -37,6 +37,8 @@ pub struct AppState {
     pub channel_hls: ChannelHls,
     /// Low-latency Program WHEP monitor hub
     pub program_whep: Arc<crate::program_whep::ProgramWhep>,
+    /// Per-source WHEP hubs (Preview / selected monitors)
+    pub source_whep: Arc<crate::program_whep::SourceWhepRegistry>,
     /// Program output — the channel that egress and preview-program read from
     pub program_tx: broadcast::Sender<Bytes>,
     /// The source actually routed to program. Written by the failover supervisor,

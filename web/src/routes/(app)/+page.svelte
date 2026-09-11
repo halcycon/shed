@@ -16,6 +16,7 @@
 	import StatusIndicator from '../../components/StatusIndicator.svelte';
 	import VideoPreview from '../../components/VideoPreview.svelte';
 	import ProgramMonitor from '../../components/ProgramMonitor.svelte';
+	import WhepMonitor from '../../components/WhepMonitor.svelte';
 	import { popout } from '$lib/popout';
 	import PopoutButton from '../../components/PopoutButton.svelte';
 	import { Checkbox } from '$lib/components/ui/checkbox';
@@ -398,7 +399,10 @@
 				</header>
 				{#if previewSourceId}
 					{#key previewSourceId}
-						<VideoPreview sourceId={previewSourceId} />
+						<WhepMonitor
+							target={{ kind: 'source', sourceId: previewSourceId }}
+							fallbackSourceId={previewSourceId}
+						/>
 					{/key}
 				{:else}
 					<div class="scanlines-well flex aspect-video items-center justify-center border-t border-border">
