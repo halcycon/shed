@@ -156,6 +156,7 @@ pub fn build_router(
         .route("/audio/mix", post(audio::toggle_mix))
         .route("/audio/analyse/{source_id}", post(audio::analyse_source))
         .route("/audio/filters/{source_id}", post(audio::set_filters))
+        .route("/audio/duck/{source_id}", post(audio::set_duck))
         // Source switching
         .route("/program", get(switching::get_program))
         .route("/program/whep", post(whep_program::create))

@@ -73,12 +73,17 @@
 			<span class="h-2 w-2 shrink-0 rounded-full" style={dotStyle()}></span>
 			<span class="truncate text-amber">{source.name}</span>
 			<span class="pill {statePill()}">{stateLabel()}</span>
+			{#if source.kind.type === 'rtmp' && source.kind.audio_only}
+				<span class="pill pill--idle">AUDIO</span>
+			{/if}
 		</div>
 		<span class="label shrink-0">
 			{source.kind.type === 'srt'
 				? 'SRT'
 				: source.kind.type === 'rtmp'
-				? 'RTMP'
+				? source.kind.audio_only
+					? 'RTMP audio'
+					: 'RTMP'
 				: source.kind.type === 'web_rtc'
 				? 'WHIP'
 				: source.kind.type}

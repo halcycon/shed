@@ -60,7 +60,9 @@
 				source_id: id,
 				muted: false,
 				volume: 1,
-				filters: emptyFilters()
+				filters: emptyFilters(),
+				duck_others: false,
+				duck_level: 0.25
 			}
 		);
 	}
@@ -210,6 +212,18 @@
 		}
 	}
 
+	async function toggleDuck(id: string) {
+		error = '';
+		const ch = channel(id);
+		const next = !ch.duck_others;
+		try {
+			const r = await api.setSourceDuck(id, next, ch.duck_level ?? 0.25);
+			publish(r);
+		} catch (e) {
+			error = String(e);
+		}
+	}
+
 	function togglePfl(id: string) {
 		pflSourceId = pflSourceId === id ? null : id;
 	}
@@ -270,6 +284,7 @@
 				Independent: one source feeds programme audio. Pick a strip below.
 			{/if}
 			PFL is headphones-only (not on air). Analyse samples ~12s then suggests bus DSP — Apply puts it on air.
+			Duck (Mix mode): when that strip has signal, other legs dip.
 		</p>
 		{#if error}
 			<p class="text-[11px] text-danger">{error}</p>
@@ -303,6 +318,12 @@
 					{#if onAir}
 						<span class="pill pill--live shrink-0">● PGM</span>
 					{/if}
+					{#if source.kind.type === 'rtmp' && source.kind.audio_only}
+						<span class="pill pill--idle shrink-0">AUDIO</span>
+					{/if}
+					{#if ch.duck_others}
+						<span class="pill shrink-0" title="Ducks other mix legs when this strip has signal">DUCK</span>
+					{/if}
 					{#if filtersActive(applied)}
 						<span class="pill shrink-0" title={(applied?.notes ?? []).join(' ')}>{filterSummary(applied!)}</span>
 					{/if}
@@ -335,6 +356,15 @@
 						onclick={() => togglePfl(source.id)}
 					>
 						PFL
+					</button>
+					<button
+						type="button"
+						class="btn shrink-0 {ch.duck_others ? 'btn--go' : ''}"
+						style="min-height:24px;padding:2px 8px"
+						title="When this strip has signal, duck other Mix legs (soundboard / FX)"
+						onclick={() => toggleDuck(source.id)}
+					>
+						Duck
 					</button>
 					<button
 						type="button"

@@ -44,6 +44,7 @@ pub async fn set_routing(
 ) -> Result<Json<AudioRouting>, ApiError> {
     for ch in routing.channels.iter_mut() {
         ch.volume = ch.volume.clamp(0.0, 2.0);
+        ch.duck_level = ch.duck_level.clamp(0.05, 1.0);
     }
     let _ = state.audio_routing.send(routing.clone());
     persist_routing(&state, &routing).await;
@@ -201,6 +202,32 @@ pub async fn set_filters(
         .map_err(|_| MuxshedError::BadRequest("invalid uuid".to_string()))?;
     state.audio_routing.send_modify(|routing| {
         routing.channel_mut(id).filters = body.filters.clone();
+    });
+    let routing = state.audio_routing.borrow().clone();
+    persist_routing(&state, &routing).await;
+    Ok(Json(routing))
+}
+
+#[derive(Deserialize)]
+pub struct SetDuckRequest {
+    pub duck_others: bool,
+    pub duck_level: Option<f32>,
+}
+
+/// Enable/disable sidechain ducking of other mix legs when this strip has signal.
+pub async fn set_duck(
+    State(state): State<Arc<AppState>>,
+    Path(source_id): Path<String>,
+    Json(body): Json<SetDuckRequest>,
+) -> Result<Json<AudioRouting>, ApiError> {
+    let id: Uuid = source_id
+        .parse()
+        .map_err(|_| MuxshedError::BadRequest("invalid uuid".to_string()))?;
+    let level = body.duck_level.unwrap_or(0.25).clamp(0.05, 1.0);
+    state.audio_routing.send_modify(|routing| {
+        let ch = routing.channel_mut(id);
+        ch.duck_others = body.duck_others;
+        ch.duck_level = level;
     });
     let routing = state.audio_routing.borrow().clone();
     persist_routing(&state, &routing).await;

@@ -132,6 +132,16 @@ pub struct AudioChannelState {
     /// Optional jive-inspired live DSP (analyse → suggest → apply).
     #[serde(default)]
     pub filters: AudioDspFilters,
+    /// When true and this leg has signal, sidechain-duck all other mix legs.
+    #[serde(default)]
+    pub duck_others: bool,
+    /// Residual gain on ducked legs while this strip is hot (0.0–1.0, default 0.25).
+    #[serde(default = "default_duck_level")]
+    pub duck_level: f32,
+}
+
+fn default_duck_level() -> f32 {
+    0.25
 }
 
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
@@ -166,6 +176,8 @@ impl AudioRouting {
                 muted: false,
                 volume: 1.0,
                 filters: AudioDspFilters::default(),
+                duck_others: false,
+                duck_level: default_duck_level(),
             });
         }
     }

@@ -180,7 +180,18 @@
 	}
 
 	function liveStreamSources() {
-		return $sources.filter((s) => s.state === 'live' && s.kind.type !== 'media_file');
+		return $sources.filter(
+			(s) =>
+				s.state === 'live' &&
+				s.kind.type !== 'media_file' &&
+				!(s.kind.type === 'rtmp' && s.kind.audio_only)
+		);
+	}
+
+	function liveAudioOnlySources() {
+		return $sources.filter(
+			(s) => s.state === 'live' && s.kind.type === 'rtmp' && !!s.kind.audio_only
+		);
 	}
 
 	async function cutToSource(id: string) {
@@ -628,6 +639,16 @@
 									</div>
 								</div>
 							{/each}
+						</div>
+					{/if}
+					{#if liveAudioOnlySources().length > 0}
+						<div class="mt-3 flex flex-wrap gap-2">
+							{#each liveAudioOnlySources() as source (source.id)}
+								<span class="pill pill--live text-[10px]" title="Audio-only RTMP — use the Audio mixer">
+									▮ {source.name}
+								</span>
+							{/each}
+							<span class="text-[10px] text-amber-muted self-center">audio-only · mixer</span>
 						</div>
 					{/if}
 

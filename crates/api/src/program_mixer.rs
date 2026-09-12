@@ -27,6 +27,9 @@ pub struct MixLeg {
     pub source_id: Uuid,
     pub volume: f32,
     pub filters: AudioDspFilters,
+    pub duck_others: bool,
+    /// Residual gain on other legs while this ducker is hot (0.05–1.0).
+    pub duck_level: f32,
 }
 
 /// Run until `cancel` is true. Writes mixed programme FLV tags to `program_tx`.
@@ -302,25 +305,30 @@ async fn load_output_config(state: &AppState) -> OutputConfig {
 }
 
 fn build_mix_filter_graph(legs: &[MixLeg]) -> String {
-    if legs.len() == 1 {
-        let vol = legs[0].volume.clamp(0.0, 2.0);
-        let mut chain = String::new();
-        if let Some(dsp) = legs[0].filters.to_ffmpeg_chain() {
-            chain.push_str(&dsp);
-            chain.push(',');
-        }
-        chain.push_str(&format!(
-            "volume={vol:.3},aformat=sample_fmts=fltp:channel_layouts=stereo:sample_rates=48000"
-        ));
-        return format!("[1:a]{chain}[aout]");
-    }
+    let ducker_idxs: Vec<usize> = legs
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| l.duck_others)
+        .map(|(i, _)| i)
+        .collect();
+    let other_idxs: Vec<usize> = legs
+        .iter()
+        .enumerate()
+        .filter(|(_, l)| !l.duck_others)
+        .map(|(i, _)| i)
+        .collect();
+    let use_duck = !ducker_idxs.is_empty() && !other_idxs.is_empty() && legs.len() > 1;
 
+    // Per-leg preprocess: DSP + volume + aformat → labeled pads
     let mut parts = Vec::new();
-    let mut labels = Vec::new();
     for (i, leg) in legs.iter().enumerate() {
         let vol = leg.volume.clamp(0.0, 2.0);
         let idx = i + 1;
-        let label = format!("a{i}");
+        let out = if !use_duck && legs.len() == 1 {
+            "aout".to_string()
+        } else {
+            format!("a{i}")
+        };
         let mut chain = String::new();
         if let Some(dsp) = leg.filters.to_ffmpeg_chain() {
             chain.push_str(&dsp);
@@ -329,13 +337,104 @@ fn build_mix_filter_graph(legs: &[MixLeg]) -> String {
         chain.push_str(&format!(
             "volume={vol:.3},aformat=sample_fmts=fltp:channel_layouts=stereo:sample_rates=48000"
         ));
-        parts.push(format!("[{idx}:a]{chain}[{label}]"));
-        labels.push(format!("[{label}]"));
+        parts.push(format!("[{idx}:a]{chain}[{out}]"));
     }
-    let n = legs.len();
+
+    if !use_duck {
+        if legs.len() == 1 {
+            return parts[0].clone();
+        }
+        let labels: String = (0..legs.len()).map(|i| format!("[a{i}]")).collect();
+        parts.push(format!(
+            "{}amix=inputs={}:duration=longest:dropout_transition=0:normalize=0[aout]",
+            labels,
+            legs.len()
+        ));
+        return parts.join(";");
+    }
+
+    // Mix of residual levels across duckers (how quiet others get when any ducker is hot).
+    let residual = ducker_idxs
+        .iter()
+        .map(|&i| legs[i].duck_level.clamp(0.05, 1.0))
+        .fold(1.0_f32, f32::min);
+    // sidechaincompress mix: 1 = full duck toward compressed; residual≈0.25 → mix≈0.75
+    let sc_mix = (1.0 - residual).clamp(0.0, 1.0);
+    // ~-30 dBFS as linear amplitude
+    let threshold = 0.0316;
+
+    // Split each ducker into mix pad + sidechain contribution.
+    let mut sc_labels = Vec::new();
+    for &i in &ducker_idxs {
+        parts.push(format!("[a{i}]asplit=2[dm{i}][dsc{i}]"));
+        sc_labels.push(format!("[dsc{i}]"));
+    }
+
+    if sc_labels.len() == 1 {
+        let i = ducker_idxs[0];
+        parts.push(format!("[dsc{i}]anull[sc]"));
+    } else {
+        let n = sc_labels.len();
+        parts.push(format!(
+            "{}amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0[sc]",
+            sc_labels.join("")
+        ));
+    }
+
+    // Split combined SC once per other leg (sidechaincompress consumes the SC input).
+    let m = other_idxs.len();
+    if m == 1 {
+        parts.push("[sc]anull[sc0]".into());
+    } else {
+        let outs: String = (0..m).map(|j| format!("[sc{j}]")).collect();
+        parts.push(format!("[sc]asplit={m}{outs}"));
+    }
+
+    let mut final_labels = Vec::new();
+    for &i in &ducker_idxs {
+        final_labels.push(format!("[dm{i}]"));
+    }
+    for (j, &i) in other_idxs.iter().enumerate() {
+        parts.push(format!(
+            "[a{i}][sc{j}]sidechaincompress=threshold={threshold}:ratio=6:attack=40:release=250:level_sc=1:mix={sc_mix:.3}[do{i}]"
+        ));
+        final_labels.push(format!("[do{i}]"));
+    }
+
+    let n = final_labels.len();
     parts.push(format!(
         "{}amix=inputs={n}:duration=longest:dropout_transition=0:normalize=0[aout]",
-        labels.join("")
+        final_labels.join("")
     ));
     parts.join(";")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::state::AudioDspFilters;
+
+    fn leg(duck: bool) -> MixLeg {
+        MixLeg {
+            source_id: Uuid::nil(),
+            volume: 1.0,
+            filters: AudioDspFilters::default(),
+            duck_others: duck,
+            duck_level: 0.25,
+        }
+    }
+
+    #[test]
+    fn plain_mix_has_no_sidechain() {
+        let g = build_mix_filter_graph(&[leg(false), leg(false)]);
+        assert!(g.contains("amix"));
+        assert!(!g.contains("sidechaincompress"));
+    }
+
+    #[test]
+    fn duck_graph_uses_sidechain() {
+        let g = build_mix_filter_graph(&[leg(true), leg(false)]);
+        assert!(g.contains("sidechaincompress"));
+        assert!(g.contains("asplit"));
+    }
 }

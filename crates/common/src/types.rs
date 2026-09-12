@@ -16,7 +16,12 @@ pub struct Source {
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SourceKind {
-    Rtmp { stream_key: String },
+    Rtmp {
+        stream_key: String,
+        /// Soundboard / bed: AAC-only ingest, never Program video.
+        #[serde(default)]
+        audio_only: bool,
+    },
     Srt { port: u16, passphrase: Option<String> },
     WebRtc { token: String },
     TestPattern,
@@ -27,6 +32,12 @@ pub enum SourceKind {
         loop_mode: String,
     },
     Browser { url: String },
+}
+
+impl SourceKind {
+    pub fn is_audio_only(&self) -> bool {
+        matches!(self, SourceKind::Rtmp { audio_only: true, .. })
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema, PartialEq)]
@@ -331,7 +342,14 @@ mod tests {
 
     #[test]
     fn source_kind_tags() {
-        assert_eq!(to_value(SourceKind::Rtmp { stream_key: "k".into() }).unwrap()["type"], "rtmp");
+        assert_eq!(
+            to_value(SourceKind::Rtmp {
+                stream_key: "k".into(),
+                audio_only: false
+            })
+            .unwrap()["type"],
+            "rtmp"
+        );
         assert_eq!(to_value(SourceKind::Srt { port: 9000, passphrase: None }).unwrap()["type"], "srt");
         assert_eq!(to_value(SourceKind::WebRtc { token: "t".into() }).unwrap()["type"], "web_rtc");
         assert_eq!(to_value(SourceKind::TestPattern).unwrap()["type"], "test_pattern");
@@ -342,12 +360,22 @@ mod tests {
             loop_mode: "loop".into(),
         };
         assert_eq!(to_value(&mf).unwrap()["type"], "media_file");
+        // Legacy JSON without audio_only still deserializes.
+        let legacy: SourceKind = serde_json::from_str(r#"{"type":"rtmp","stream_key":"x"}"#).unwrap();
+        assert!(!legacy.is_audio_only());
     }
 
     #[test]
     fn source_kind_roundtrip_all_variants() {
         for k in [
-            SourceKind::Rtmp { stream_key: "abc".into() },
+            SourceKind::Rtmp {
+                stream_key: "abc".into(),
+                audio_only: false,
+            },
+            SourceKind::Rtmp {
+                stream_key: "bed".into(),
+                audio_only: true,
+            },
             SourceKind::Srt { port: 9001, passphrase: Some("pass1234567".into()) },
             SourceKind::Srt { port: 9002, passphrase: None },
             SourceKind::WebRtc { token: "tok".into() },

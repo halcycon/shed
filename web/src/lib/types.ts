@@ -9,12 +9,17 @@ export interface Instance {
 }
 
 export type SourceKind =
-	| { type: 'rtmp'; stream_key: string }
+	| { type: 'rtmp'; stream_key: string; audio_only?: boolean }
 	| { type: 'srt'; port: number; passphrase?: string }
 	| { type: 'browser'; url: string }
 	| { type: 'web_rtc'; token: string }
 	| { type: 'test_pattern' }
 	| { type: 'media_file'; asset_id: string; file_path: string; loop_mode: string };
+
+/** True for RTMP soundboard/bed sources (no Program video). */
+export function isAudioOnlySource(source: { kind: SourceKind }): boolean {
+	return source.kind.type === 'rtmp' && !!source.kind.audio_only;
+}
 
 export type SourceState = 'disconnected' | 'connecting' | 'live' | { error: string };
 
@@ -138,6 +143,10 @@ export interface AudioChannelState {
 	muted: boolean;
 	volume: number;
 	filters?: AudioDspFilters;
+	/** When true, this strip sidechain-ducks other mix legs while it has signal. */
+	duck_others?: boolean;
+	/** Residual gain on ducked legs (0.05–1, default 0.25). */
+	duck_level?: number;
 }
 
 export interface AudioRouting {

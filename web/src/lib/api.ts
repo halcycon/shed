@@ -151,6 +151,11 @@ export const api = {
 			method: 'POST',
 			body: JSON.stringify({ filters })
 		}),
+	setSourceDuck: (sourceId: string, duckOthers: boolean, duckLevel?: number) =>
+		request<AudioRouting>(`/audio/duck/${sourceId}`, {
+			method: 'POST',
+			body: JSON.stringify({ duck_others: duckOthers, duck_level: duckLevel })
+		}),
 
 	// Output config/stats
 	getOutputConfig: () => request<OutputConfig>('/output/config'),

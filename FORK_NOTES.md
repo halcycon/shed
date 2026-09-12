@@ -34,9 +34,10 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
 
 - `PIPELINE.md` — encode vs copy stage map (upstream no-transcode vision)
 - Programme **audio mixer** (AFV / Independent / Mix): mute, volume, multi-source `amix` on bus
-- `crates/api/src/program_mixer.rs` — ffmpeg video-copy + AAC mix → `program_tx`
+- `crates/api/src/program_mixer.rs` — ffmpeg video-copy + AAC mix → `program_tx`; **Duck** via `sidechaincompress`
 - `crates/api/src/audio_analyse.rs` — capture ~12s → ebur128/astats → suggest DSP
 - Mixer strips: **Analyse / Apply / Clear** (jive-inspired HP/denoise/gate/compress on bus)
+- **Audio-only RTMP** (`SourceKind::Rtmp.audio_only`) — AAC-only normalizer, no black video; Mix + Duck for soundboards
 - `crates/api/src/egress.rs` — **RTMP `-c copy` by default**; `OutputConfig.transcode_egress` escape hatch
 - `crates/api/src/webrtc_ingest.rs` — H.264 WHIP remux (video copy + Opus→AAC); VP8 normalizes
 - `crates/api/src/scene_compositor.rs` — low-delay flags; identity scene skips compositor encode
@@ -95,14 +96,14 @@ There is no fork product name in the guest UI.
 Prefer immutable tags:
 
 ```text
-ghcr.io/halcycon/shed:1.8.6-guestux.13
+ghcr.io/halcycon/shed:1.8.6-guestux.14
 ```
 
 Branch pushes also publish `ghcr.io/halcycon/shed:guestux` (mutable smoke tag).
 
 ## Arcane deploy / rollback
 
-1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.13` (or newer).
+1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.14` (or newer).
 2. In Arcane, set image to that tag (volumes unchanged).
 3. Rollback: `ghcr.io/muxshed/shed:1.8.6`.
 
@@ -136,6 +137,8 @@ cd web && npm ci && npm run check && npm run build
 cargo test -p muxshed-api channel_hls --lib
 cargo test -p muxshed-api scene_compositor --lib
 cargo test -p muxshed-api audio_analyse --lib
+cargo test -p muxshed-api program_mixer --lib
+cargo test -p muxshed-common --lib
 ```
 
 ### Acceptance (live studio)
@@ -149,3 +152,5 @@ cargo test -p muxshed-api audio_analyse --lib
 - While live + `/watch` open, Program must not feel slower than the grid
 - Audio strip **Analyse** (~12s) → notes + suggestion → **Apply** inserts bus DSP; **Clear DSP** removes it
 - Mix + DSP keeps lips on the Muxshed bus (not offboard)
+- Create RTMP **Audio only** source → publish AAC-only → Live; strip in Audio mixer, not Program video
+- Mix + **Duck** on soundboard → play FX → other legs dip, then recover

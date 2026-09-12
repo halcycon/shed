@@ -135,6 +135,8 @@ pub async fn resolve_audio_legs(
                 source_id: id,
                 volume: volume.clamp(0.0, 2.0),
                 filters: ch.map(|c| c.filters.clone()).unwrap_or_default(),
+                duck_others: ch.map(|c| c.duck_others).unwrap_or(false),
+                duck_level: ch.map(|c| c.duck_level).unwrap_or(0.25).clamp(0.05, 1.0),
             });
         }
     } else {
@@ -152,6 +154,8 @@ pub async fn resolve_audio_legs(
                     source_id: audio_id,
                     volume: volume.clamp(0.0, 2.0),
                     filters: ch.map(|c| c.filters.clone()).unwrap_or_default(),
+                    duck_others: ch.map(|c| c.duck_others).unwrap_or(false),
+                    duck_level: ch.map(|c| c.duck_level).unwrap_or(0.25).clamp(0.05, 1.0),
                 });
             }
         }
@@ -171,6 +175,9 @@ fn needs_ffmpeg_mixer(routing: &crate::state::AudioRouting, legs: &[MixLeg]) -> 
         return true;
     }
     if legs.iter().any(|l| l.filters.is_active()) {
+        return true;
+    }
+    if legs.iter().any(|l| l.duck_others) {
         return true;
     }
     legs.iter().any(|l| (l.volume - 1.0).abs() > 0.02)

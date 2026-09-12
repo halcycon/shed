@@ -15,6 +15,17 @@ pub fn flv_header() -> Bytes {
     buf.freeze()
 }
 
+/// FLV header for audio-only streams (soundboard / bed).
+pub fn flv_header_audio_only() -> Bytes {
+    let mut buf = BytesMut::with_capacity(13);
+    buf.put_slice(b"FLV");
+    buf.put_u8(1); // version
+    buf.put_u8(0x04); // audio only
+    buf.put_u32(9); // data offset
+    buf.put_u32(0); // previous tag size (first)
+    buf.freeze()
+}
+
 pub fn flv_audio_tag(data: &[u8], timestamp_ms: u32) -> Bytes {
     flv_tag(FLV_TAG_AUDIO, data, timestamp_ms)
 }

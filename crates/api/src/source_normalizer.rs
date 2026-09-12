@@ -4,6 +4,8 @@
 //! Each source gets its own FFmpeg process: raw FLV in -> normalized FLV out.
 //! The normalized output feeds the public media relay so the program router
 //! only ever switches between streams of identical resolution/codec/framerate.
+//!
+//! Audio-only RTMP sources (soundboard / bed) skip video and remux/encode AAC.
 
 use bytes::Bytes;
 use std::process::Stdio;
@@ -15,6 +17,7 @@ use uuid::Uuid;
 
 use crate::routes::output::OutputConfig;
 use crate::state::AppState;
+use muxshed_common::SourceKind;
 
 /// Start the normalizer for an RTMP source.
 /// Returns a sender for raw FLV data (what the RTMP ingest writes to).
@@ -25,51 +28,99 @@ pub async fn start_normalizer(
     source_id: Uuid,
 ) -> Result<broadcast::Sender<Bytes>, String> {
     let cfg = load_output_config(&state).await;
+    let audio_only = load_audio_only(&state, source_id).await;
 
     let (raw_tx, _) = broadcast::channel::<Bytes>(4096);
     let raw_tx_clone = raw_tx.clone();
 
     let public_tx = state.get_or_create_media_relay(source_id).await;
 
-    let vf = format!(
-        "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
-        cfg.width, cfg.height, cfg.width, cfg.height
-    );
-    let bv = format!("{}k", cfg.video_bitrate_kbps);
-    let maxrate = format!("{}k", cfg.video_bitrate_kbps);
-    let bufsize = format!("{}k", cfg.video_bitrate_kbps * 2);
-    let gop = format!("{}", cfg.fps * 2);
-    let fps = format!("{}", cfg.fps);
     let ba = format!("{}k", cfg.audio_bitrate_kbps);
 
-    let args = vec![
-        "-hide_banner",
-        "-loglevel", "warning",
-        "-f", "flv",
-        "-i", "pipe:0",
-        "-vf", &vf,
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-tune", "zerolatency",
-        "-bf", "0",
-        "-b:v", &bv,
-        "-maxrate", &maxrate,
-        "-bufsize", &bufsize,
-        "-g", &gop,
-        "-r", &fps,
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", &ba,
-        "-ar", "48000",
-        "-f", "flv",
-        "-flvflags", "no_duration_filesize",
-        "pipe:1",
-    ];
+    let args: Vec<String> = if audio_only {
+        tracing::info!("starting audio-only normalizer for {}", source_id);
+        vec![
+            "-hide_banner".into(),
+            "-loglevel".into(),
+            "warning".into(),
+            "-f".into(),
+            "flv".into(),
+            "-i".into(),
+            "pipe:0".into(),
+            "-vn".into(),
+            "-c:a".into(),
+            "aac".into(),
+            "-b:a".into(),
+            ba,
+            "-ar".into(),
+            "48000".into(),
+            "-ac".into(),
+            "2".into(),
+            "-f".into(),
+            "flv".into(),
+            "-flvflags".into(),
+            "no_duration_filesize".into(),
+            "pipe:1".into(),
+        ]
+    } else {
+        let vf = format!(
+            "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
+            cfg.width, cfg.height, cfg.width, cfg.height
+        );
+        let bv = format!("{}k", cfg.video_bitrate_kbps);
+        let maxrate = format!("{}k", cfg.video_bitrate_kbps);
+        let bufsize = format!("{}k", cfg.video_bitrate_kbps * 2);
+        let gop = format!("{}", cfg.fps * 2);
+        let fps = format!("{}", cfg.fps);
 
-    tracing::info!(
-        "starting source normalizer for {} ({}x{}@{}fps)",
-        source_id, cfg.width, cfg.height, cfg.fps
-    );
+        tracing::info!(
+            "starting source normalizer for {} ({}x{}@{}fps)",
+            source_id, cfg.width, cfg.height, cfg.fps
+        );
+
+        vec![
+            "-hide_banner".into(),
+            "-loglevel".into(),
+            "warning".into(),
+            "-f".into(),
+            "flv".into(),
+            "-i".into(),
+            "pipe:0".into(),
+            "-vf".into(),
+            vf,
+            "-c:v".into(),
+            "libx264".into(),
+            "-preset".into(),
+            "veryfast".into(),
+            "-tune".into(),
+            "zerolatency".into(),
+            "-bf".into(),
+            "0".into(),
+            "-b:v".into(),
+            bv,
+            "-maxrate".into(),
+            maxrate,
+            "-bufsize".into(),
+            bufsize,
+            "-g".into(),
+            gop,
+            "-r".into(),
+            fps,
+            "-pix_fmt".into(),
+            "yuv420p".into(),
+            "-c:a".into(),
+            "aac".into(),
+            "-b:a".into(),
+            ba,
+            "-ar".into(),
+            "48000".into(),
+            "-f".into(),
+            "flv".into(),
+            "-flvflags".into(),
+            "no_duration_filesize".into(),
+            "pipe:1".into(),
+        ]
+    };
 
     let mut child = Command::new("ffmpeg")
         .args(&args)
@@ -108,9 +159,14 @@ pub async fn start_normalizer(
     }
 
     let mut raw_rx = raw_tx.subscribe();
+    let write_audio_header = audio_only;
     tokio::spawn(async move {
         let mut stdin = stdin;
-        let header = crate::rtmp::flv::flv_header();
+        let header = if write_audio_header {
+            crate::rtmp::flv::flv_header_audio_only()
+        } else {
+            crate::rtmp::flv::flv_header()
+        };
         if stdin.write_all(&header).await.is_err() {
             return;
         }
@@ -138,6 +194,18 @@ pub async fn start_normalizer(
     });
 
     Ok(raw_tx_clone)
+}
+
+async fn load_audio_only(state: &AppState, source_id: Uuid) -> bool {
+    let row = sqlx::query_as::<_, (String,)>("SELECT kind FROM sources WHERE id = ?")
+        .bind(source_id.to_string())
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten();
+    row.and_then(|(json,)| serde_json::from_str::<SourceKind>(&json).ok())
+        .map(|k| k.is_audio_only())
+        .unwrap_or(false)
 }
 
 async fn read_normalized_output(

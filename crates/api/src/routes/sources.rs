@@ -344,8 +344,12 @@ struct AssetRow {
 
 fn ensure_stream_key(kind: SourceKind) -> SourceKind {
     match kind {
-        SourceKind::Rtmp { stream_key } if stream_key.is_empty() => SourceKind::Rtmp {
+        SourceKind::Rtmp {
+            stream_key,
+            audio_only,
+        } if stream_key.is_empty() => SourceKind::Rtmp {
             stream_key: generate_stream_key(),
+            audio_only,
         },
         SourceKind::WebRtc { token } if token.is_empty() => SourceKind::WebRtc {
             token: generate_stream_key(),

@@ -11,7 +11,12 @@
 	let channel: BroadcastChannel;
 
 	function liveSources(): Source[] {
-		return $sources.filter((s) => s.state === 'live');
+		return $sources.filter(
+			(s) =>
+				s.state === 'live' &&
+				s.kind.type !== 'media_file' &&
+				!(s.kind.type === 'rtmp' && s.kind.audio_only)
+		);
 	}
 
 	onMount(async () => {

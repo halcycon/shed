@@ -11,6 +11,7 @@
 	let protocol = $state<'rtmp' | 'srt' | 'browser' | 'webrtc'>('rtmp');
 	let srtPassphrase = $state('');
 	let browserUrl = $state('');
+	let audioOnly = $state(false);
 	let creating = $state(false);
 
 	onMount(refresh);
@@ -36,12 +37,13 @@
 			} else if (protocol === 'webrtc') {
 				kind = { type: 'web_rtc', token: '' };
 			} else {
-				kind = { type: 'rtmp', stream_key: '' };
+				kind = { type: 'rtmp', stream_key: '', audio_only: audioOnly };
 			}
 			await api.createSource(name.trim(), kind);
 			name = '';
 			srtPassphrase = '';
 			browserUrl = '';
+			audioOnly = false;
 			await refresh();
 			notify.success('Source added');
 		} catch (e) {
@@ -97,6 +99,11 @@
 							class="input"
 						/>
 					</div>
+				{:else if protocol === 'rtmp'}
+					<label class="flex items-center gap-2 text-xs text-amber-dim">
+						<input type="checkbox" bind:checked={audioOnly} class="accent-[var(--color-amber)]" />
+						Audio only (soundboard / bed — no Program video)
+					</label>
 				{/if}
 				<button type="submit" disabled={creating || !name.trim()} class="btn">
 					{creating ? 'Adding…' : '+ Add Source'}

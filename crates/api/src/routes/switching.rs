@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::error::ApiError;
 use crate::state::AppState;
-use muxshed_common::{MuxshedError, WsEvent};
+use muxshed_common::{MuxshedError, SourceKind, WsEvent};
 
 #[derive(Serialize)]
 pub struct ProgramState {
@@ -36,6 +36,17 @@ pub async fn get_program(
     }))
 }
 
+async fn load_source_kind(state: &AppState, id: Uuid) -> Result<SourceKind, ApiError> {
+    let row = sqlx::query_as::<_, (String,)>("SELECT kind FROM sources WHERE id = ?")
+        .bind(id.to_string())
+        .fetch_optional(&state.db)
+        .await
+        .map_err(|e| MuxshedError::Internal(e.to_string()))?
+        .ok_or_else(|| MuxshedError::NotFound("source not found".to_string()))?;
+    serde_json::from_str(&row.0)
+        .map_err(|_| MuxshedError::BadRequest("invalid source kind".to_string()).into())
+}
+
 pub async fn set_preview(
     State(state): State<Arc<AppState>>,
     Path(source_id): Path<String>,
@@ -49,6 +60,14 @@ pub async fn set_preview(
         return Err(MuxshedError::BadRequest("source is not live".to_string()).into());
     }
     drop(states);
+
+    let kind = load_source_kind(&state, id).await?;
+    if kind.is_audio_only() {
+        return Err(MuxshedError::BadRequest(
+            "audio-only sources cannot be Preview video".to_string(),
+        )
+        .into());
+    }
 
     let mut preview = state.preview_source.write().await;
     *preview = Some(id);
@@ -71,6 +90,14 @@ pub async fn cut(
         return Err(MuxshedError::BadRequest("source is not live".to_string()).into());
     }
     drop(states);
+
+    let kind = load_source_kind(&state, id).await?;
+    if kind.is_audio_only() {
+        return Err(MuxshedError::BadRequest(
+            "audio-only sources cannot be Program video — use the Audio mixer".to_string(),
+        )
+        .into());
+    }
 
     // Cutting to a single source replaces any active scene composite.
     crate::scene_compositor::stop_all_compositors(&state).await;
