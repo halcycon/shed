@@ -33,6 +33,11 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
   connection drops or the browser comes back online
 - `SPEC.md` — guest UX requirements
 
+### Operator guide
+
+- `guide/README.md` — beginner's guide with screenshots (login, guests, OBS/WHIP/SRT,
+  switching, scenes, destinations, Channel, overload warning, troubleshooting)
+
 ### Studio / Channel / latency
 
 - `PIPELINE.md` — encode vs copy stage map (upstream no-transcode vision)
@@ -95,6 +100,14 @@ podman image inspect ghcr.io/muxshed/shed:1.8.6 \
    the program router (passthrough and Mix), failover monitor and scene compositors kept the old
    one. They now listen for `SourceState` Live/Disconnected and re-subscribe or restart
    (`scene_compositor::run_scene_supervisor` for the on-air scene).
+9. **Guest video sometimes never arrived** — ingest polled transceivers and read tracks while
+   webrtc-rs was still peeking their first packet; one guest's video stalled until the 30s
+   watchdog. Tracks are now taken from `on_track`, registered before the offer is applied.
+10. **Program monitor black for scenes** — composited scenes are video-only, but the preview
+    WS announced audio+video, so mpegts.js waited for audio forever. Composited scenes now get
+    a video-only FLV header.
+11. **Scenes wrong on a 720p canvas** — the editor stores layer geometry in 1920x1080 space
+    but the compositor used it as canvas pixels. Layers are now scaled to the canvas.
 
 ## Studio monitors (guestux.10)
 
@@ -118,14 +131,14 @@ There is no fork product name in the guest UI.
 Prefer immutable tags:
 
 ```text
-ghcr.io/halcycon/shed:1.8.6-guestux.14
+ghcr.io/halcycon/shed:1.8.6-guestux.15
 ```
 
 Branch pushes also publish `ghcr.io/halcycon/shed:guestux` (mutable smoke tag).
 
 ## Arcane deploy / rollback
 
-1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.14` (or newer).
+1. Pull `ghcr.io/halcycon/shed:1.8.6-guestux.15` (or newer).
 2. In Arcane, set image to that tag (volumes unchanged).
 3. Rollback: `ghcr.io/muxshed/shed:1.8.6`.
 
