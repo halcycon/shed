@@ -35,8 +35,13 @@ async fn handle_preview(mut socket: WebSocket, state: Arc<AppState>, id: String)
     let mut rx = tx.subscribe();
     tracing::info!("preview client connected for source {}", source_id);
 
-    // Send FLV header
-    let header = flv::flv_header();
+    // Composited scenes carry no audio; players that are told to expect audio
+    // wait for it forever and never show the picture.
+    let header = if is_composited_scene(&state, source_id).await {
+        flv::flv_header_video_only()
+    } else {
+        flv::flv_header()
+    };
     if socket
         .send(Message::Binary(header.to_vec().into()))
         .await
@@ -98,4 +103,19 @@ async fn handle_preview(mut socket: WebSocket, state: Arc<AppState>, id: String)
             }
         }
     }
+}
+
+/// A scene whose output comes from the compositor (identity scenes forward
+/// their layer's audio and video unchanged).
+async fn is_composited_scene(state: &AppState, id: uuid::Uuid) -> bool {
+    if state.scene_forward_cancels.read().await.contains_key(&id) {
+        return false;
+    }
+    sqlx::query_as::<_, (i64,)>("SELECT 1 FROM scenes WHERE id = ?")
+        .bind(id.to_string())
+        .fetch_optional(&state.db)
+        .await
+        .ok()
+        .flatten()
+        .is_some()
 }

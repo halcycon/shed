@@ -113,6 +113,8 @@ pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Res
     .await
     .map_err(|e| e.to_string())?;
 
+    let cfg = load_output_config(&state).await;
+
     let mut layers = Vec::new();
     for (sid, x, y, w, h, _z, op, fit) in rows {
         if let Ok(source_id) = sid.parse::<Uuid>() {
@@ -134,10 +136,10 @@ pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Res
             if has_relay && has_video {
                 layers.push(CompLayer {
                     source_id,
-                    x: x as i32,
-                    y: y as i32,
-                    w: (w as u32).max(2),
-                    h: (h as u32).max(2),
+                    x: to_canvas(x, cfg.width, LAYOUT_W) as i32,
+                    y: to_canvas(y, cfg.height, LAYOUT_H) as i32,
+                    w: (to_canvas(w, cfg.width, LAYOUT_W) as u32).max(2),
+                    h: (to_canvas(h, cfg.height, LAYOUT_H) as u32).max(2),
                     opacity: op as f32,
                     fit: LayerFit::from_db(&fit),
                 });
@@ -153,8 +155,6 @@ pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Res
     if layers.is_empty() {
         return Err("scene has no live layers".to_string());
     }
-
-    let cfg = load_output_config(&state).await;
 
     // Single full-frame opaque layer: forward the source relay — no extra encode.
     if layers.len() == 1 && is_identity_layer(&layers[0], cfg.width, cfg.height) {
@@ -482,6 +482,15 @@ pub async fn stop_all_compositors(state: &AppState) {
     }
 }
 
+/// Layer geometry is stored in the scene editor's fixed 1920x1080 space,
+/// whatever the output canvas size.
+const LAYOUT_W: i64 = 1920;
+const LAYOUT_H: i64 = 1080;
+
+fn to_canvas(v: i64, canvas: u32, layout: i64) -> i64 {
+    (v * canvas as i64 + layout / 2).div_euclid(layout)
+}
+
 /// True when a single layer covers the full canvas with no opacity/crop tricks.
 fn is_identity_layer(layer: &CompLayer, canvas_w: u32, canvas_h: u32) -> bool {
     layer.x == 0
@@ -570,8 +579,26 @@ mod tests {
     }
 
     #[test]
+    fn layout_scales_to_canvas() {
+        assert_eq!(to_canvas(960, 1280, LAYOUT_W), 640);
+        assert_eq!(to_canvas(270, 720, LAYOUT_H), 180);
+        assert_eq!(to_canvas(1920, 1920, LAYOUT_W), 1920);
+    }
+
+    #[test]
     fn identity_layer_is_full_frame_opaque() {
         assert!(is_identity_layer(&layer(0, 0, 1920, 1080, 1.0), 1920, 1080));
+        assert!(is_identity_layer(
+            &layer(
+                0,
+                0,
+                to_canvas(1920, 1280, LAYOUT_W) as u32,
+                to_canvas(1080, 720, LAYOUT_H) as u32,
+                1.0
+            ),
+            1280,
+            720
+        ));
         assert!(!is_identity_layer(&layer(0, 0, 1280, 720, 1.0), 1920, 1080));
         assert!(!is_identity_layer(&layer(10, 0, 1920, 1080, 1.0), 1920, 1080));
         assert!(!is_identity_layer(&layer(0, 0, 1920, 1080, 0.5), 1920, 1080));

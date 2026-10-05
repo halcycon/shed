@@ -15,6 +15,17 @@ pub fn flv_header() -> Bytes {
     buf.freeze()
 }
 
+/// FLV header for video-only streams (composited scenes).
+pub fn flv_header_video_only() -> Bytes {
+    let mut buf = BytesMut::with_capacity(13);
+    buf.put_slice(b"FLV");
+    buf.put_u8(1); // version
+    buf.put_u8(0x01); // video only
+    buf.put_u32(9); // data offset
+    buf.put_u32(0); // previous tag size (first)
+    buf.freeze()
+}
+
 /// FLV header for audio-only streams (soundboard / bed).
 pub fn flv_header_audio_only() -> Bytes {
     let mut buf = BytesMut::with_capacity(13);

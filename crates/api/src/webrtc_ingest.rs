@@ -185,12 +185,41 @@ pub async fn start_ingest(
         })
     }));
 
+    let public_tx = state.get_or_create_media_relay(source_id).await;
+
+    // webrtc-rs peeks each track's first packet before calling on_track; reading
+    // the track ourselves before then races that peek and can stall the track.
+    // ffmpeg starts lazily once the video codec is known (see forward_track).
+    let ffmpeg_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    {
+        let track_pc = Arc::downgrade(&pc);
+        let fwd = forward.clone();
+        let st = state.clone();
+        let started = ffmpeg_started.clone();
+        let public_tx = public_tx.clone();
+        pc.on_track(Box::new(move |track, _receiver, _transceiver| {
+            let is_video = track.kind() == RTPCodecType::Video;
+            forward_track(
+                track,
+                is_video,
+                video_port,
+                audio_port,
+                fwd.clone(),
+                source_id,
+                track_pc.clone(),
+                st.clone(),
+                public_tx.clone(),
+                started.clone(),
+                kind,
+            );
+            Box::pin(async {})
+        }));
+    }
+
     let offer = RTCSessionDescription::offer(offer_sdp).map_err(|e| format!("bad offer: {}", e))?;
     pc.set_remote_description(offer)
         .await
         .map_err(|e| format!("set remote description: {}", e))?;
-
-    let public_tx = state.get_or_create_media_relay(source_id).await;
 
     let answer = pc
         .create_answer(None)
@@ -207,45 +236,6 @@ pub async fn start_ingest(
         .await
         .ok_or("no local description after gathering")?
         .sdp;
-
-    // Pump: poll the transceivers' receivers for tracks and forward each one's
-    // RTP. We start ffmpeg lazily once the video codec is known (see forward_track).
-    let ffmpeg_started = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let pump_pc = Arc::downgrade(&pc);
-    let pump_fwd = forward.clone();
-    let pump_state = state.clone();
-    let pump_started = ffmpeg_started.clone();
-    tokio::spawn(async move {
-        let mut started: std::collections::HashSet<u32> = std::collections::HashSet::new();
-        for _ in 0..60 {
-            let Some(pc) = pump_pc.upgrade() else { break };
-            for t in pc.get_transceivers().await {
-                let is_video = t.kind() == RTPCodecType::Video;
-                for track in t.receiver().await.tracks().await {
-                    let ssrc = track.ssrc();
-                    if ssrc == 0 || started.contains(&ssrc) {
-                        continue;
-                    }
-                    started.insert(ssrc);
-                    forward_track(
-                        track,
-                        is_video,
-                        video_port,
-                        audio_port,
-                        pump_fwd.clone(),
-                        source_id,
-                        pump_pc.clone(),
-                        pump_state.clone(),
-                        public_tx.clone(),
-                        pump_started.clone(),
-                        kind,
-                    );
-                }
-            }
-            drop(pc);
-            tokio::time::sleep(Duration::from_millis(500)).await;
-        }
-    });
 
     let watchdog_pc = Arc::downgrade(&pc);
     state.guest_peers.write().await.insert(source_id, pc);
