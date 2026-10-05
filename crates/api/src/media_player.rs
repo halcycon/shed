@@ -9,6 +9,7 @@ use tokio::process::Command;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+use crate::routes::output::OutputConfig;
 use crate::state::AppState;
 
 /// Start playing a media file into the source's media relay.
@@ -31,12 +32,14 @@ pub async fn start_media_playback(
     );
 
     let should_loop = is_image || loop_mode == "loop";
+    let cfg = OutputConfig::load(&state).await;
 
     let mut args: Vec<String> = vec![
         "-hide_banner".into(),
         "-loglevel".into(),
         "warning".into(),
     ];
+    args.extend(crate::encoder::input_args(&cfg));
 
     if should_loop && !is_image {
         args.extend(["-stream_loop".into(), "-1".into()]);
@@ -57,22 +60,27 @@ pub async fn start_media_playback(
         file_path.to_string_lossy().into_owned(),
     ]);
 
+    // Normalize onto the output canvas like every other bus source, so copy-mode
+    // egress and Channel HLS never see a resolution or frame-rate change.
     args.extend([
-        "-c:v".into(),
-        "libx264".into(),
-        "-preset".into(),
-        "veryfast".into(),
-        "-tune".into(),
-        "zerolatency".into(),
-        "-pix_fmt".into(),
-        "yuv420p".into(),
-        "-g".into(),
-        "60".into(),
-        "-r".into(),
-        "30".into(),
-        "-b:v".into(),
-        "2000k".into(),
+        "-vf".into(),
+        format!(
+            "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,{}",
+            cfg.width,
+            cfg.height,
+            cfg.width,
+            cfg.height,
+            crate::encoder::filter_tail(&cfg)
+        ),
     ]);
+    args.extend(crate::encoder::video_args(
+        &cfg,
+        &crate::encoder::Rate {
+            kbps: 2000,
+            gop: cfg.fps * 2,
+            fps: Some(cfg.fps),
+        },
+    ));
 
     if is_image {
         args.extend(["-t".into(), "86400".into()]);
@@ -182,11 +190,17 @@ pub async fn start_concat_playback(
     }
     tokio::fs::write(&list_path, list).await.map_err(|e| format!("write playlist: {}", e))?;
 
+    let cfg = OutputConfig::load(&state).await;
     let vf = format!(
-        "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,setsar=1",
-        width, height, width, height
+        "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,setsar=1,{}",
+        width,
+        height,
+        width,
+        height,
+        crate::encoder::filter_tail(&cfg)
     );
     let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "warning".into()];
+    args.extend(crate::encoder::input_args(&cfg));
     if loop_forever {
         args.extend(["-stream_loop".into(), "-1".into()]);
     }
@@ -194,9 +208,12 @@ pub async fn start_concat_playback(
         "-re".into(), "-f".into(), "concat".into(), "-safe".into(), "0".into(),
         "-i".into(), list_path.to_string_lossy().into_owned(),
         "-vf".into(), vf,
-        "-c:v".into(), "libx264".into(), "-preset".into(), "veryfast".into(),
-        "-tune".into(), "zerolatency".into(), "-pix_fmt".into(), "yuv420p".into(),
-        "-g".into(), format!("{}", fps * 2), "-r".into(), format!("{}", fps), "-b:v".into(), "3000k".into(),
+    ]);
+    args.extend(crate::encoder::video_args(
+        &cfg,
+        &crate::encoder::Rate { kbps: 3000, gop: fps * 2, fps: Some(fps) },
+    ));
+    args.extend([
         "-c:a".into(), "aac".into(), "-b:a".into(), "128k".into(), "-ar".into(), "48000".into(),
         "-ac".into(), "2".into(),
         "-f".into(), "flv".into(), "pipe:1".into(),

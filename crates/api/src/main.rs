@@ -158,6 +158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         preview_source: RwLock::new(None),
         audio_routing: audio_routing_tx,
         system_token,
+        health: Default::default(),
     });
 
     {
@@ -220,6 +221,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let failover_state = state.clone();
     tokio::spawn(async move {
         muxshed_api::failover::run_failover_supervisor(failover_state).await;
+    });
+
+    let scene_state = state.clone();
+    tokio::spawn(async move {
+        muxshed_api::scene_compositor::run_scene_supervisor(scene_state).await;
+    });
+
+    let health_state = state.clone();
+    tokio::spawn(async move {
+        muxshed_api::health::run_cpu_sampler(health_state).await;
     });
 
     let scheduler_state = state.clone();

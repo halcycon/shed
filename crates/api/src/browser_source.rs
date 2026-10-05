@@ -81,23 +81,37 @@ pub async fn start_browser_source(
     // ffmpeg: JPEG frames in (paced by wallclock) -> normalized FLV out.
     let public_tx = state.get_or_create_media_relay(source_id).await;
     let vf = format!(
-        "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,fps={},format=yuv420p",
-        cfg.width, cfg.height, cfg.width, cfg.height, cfg.fps
+        "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,fps={},{}",
+        cfg.width,
+        cfg.height,
+        cfg.width,
+        cfg.height,
+        cfg.fps,
+        crate::encoder::filter_tail(&cfg)
     );
-    let bv = format!("{}k", cfg.video_bitrate_kbps);
-    let bufsize = format!("{}k", cfg.video_bitrate_kbps * 2);
-    let gop = format!("{}", cfg.fps * 2);
-    let args = vec![
-        "-hide_banner", "-loglevel", "warning",
-        "-f", "image2pipe", "-use_wallclock_as_timestamps", "1", "-i", "pipe:0",
-        "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
-        "-vf", &vf,
-        "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency",
-        "-b:v", &bv, "-maxrate", &bv, "-bufsize", &bufsize,
-        "-g", &gop, "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
-        "-shortest", "-f", "flv", "-flvflags", "no_duration_filesize", "pipe:1",
-    ];
+    let rate = crate::encoder::Rate {
+        kbps: cfg.video_bitrate_kbps,
+        gop: cfg.fps * 2,
+        fps: None,
+    };
+    let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "warning".into()];
+    args.extend(crate::encoder::input_args(&cfg));
+    args.extend(
+        [
+            "-f", "image2pipe", "-use_wallclock_as_timestamps", "1", "-i", "pipe:0",
+            "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+            "-vf", &vf,
+        ]
+        .map(String::from),
+    );
+    args.extend(crate::encoder::video_args(&cfg, &rate));
+    args.extend(
+        [
+            "-c:a", "aac", "-b:a", "128k", "-ar", "48000",
+            "-shortest", "-f", "flv", "-flvflags", "no_duration_filesize", "pipe:1",
+        ]
+        .map(String::from),
+    );
 
     let mut ff = Command::new("ffmpeg")
         .args(&args)

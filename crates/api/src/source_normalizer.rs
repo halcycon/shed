@@ -64,62 +64,50 @@ pub async fn start_normalizer(
         ]
     } else {
         let vf = format!(
-            "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
-            cfg.width, cfg.height, cfg.width, cfg.height
+            "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,{}",
+            cfg.width,
+            cfg.height,
+            cfg.width,
+            cfg.height,
+            crate::encoder::filter_tail(&cfg)
         );
-        let bv = format!("{}k", cfg.video_bitrate_kbps);
-        let maxrate = format!("{}k", cfg.video_bitrate_kbps);
-        let bufsize = format!("{}k", cfg.video_bitrate_kbps * 2);
-        let gop = format!("{}", cfg.fps * 2);
-        let fps = format!("{}", cfg.fps);
 
         tracing::info!(
             "starting source normalizer for {} ({}x{}@{}fps)",
             source_id, cfg.width, cfg.height, cfg.fps
         );
 
-        vec![
+        let mut args: Vec<String> = vec![
             "-hide_banner".into(),
             "-loglevel".into(),
             "warning".into(),
+        ];
+        args.extend(crate::encoder::input_args(&cfg));
+        args.extend([
             "-f".into(),
             "flv".into(),
             "-i".into(),
             "pipe:0".into(),
             "-vf".into(),
             vf,
-            "-c:v".into(),
-            "libx264".into(),
-            "-preset".into(),
-            "veryfast".into(),
-            "-tune".into(),
-            "zerolatency".into(),
-            "-bf".into(),
-            "0".into(),
-            "-b:v".into(),
-            bv,
-            "-maxrate".into(),
-            maxrate,
-            "-bufsize".into(),
-            bufsize,
-            "-g".into(),
-            gop,
-            "-r".into(),
-            fps,
-            "-pix_fmt".into(),
-            "yuv420p".into(),
+        ]);
+        args.extend(crate::encoder::video_args(&cfg, &crate::encoder::Rate::canvas(&cfg)));
+        args.extend([
             "-c:a".into(),
             "aac".into(),
             "-b:a".into(),
             ba,
             "-ar".into(),
             "48000".into(),
+            "-ac".into(),
+            "2".into(),
             "-f".into(),
             "flv".into(),
             "-flvflags".into(),
             "no_duration_filesize".into(),
             "pipe:1".into(),
-        ]
+        ]);
+        args
     };
 
     let mut child = Command::new("ffmpeg")
@@ -221,12 +209,18 @@ async fn read_normalized_output(
     }
 
     let mut frame_count: u64 = 0;
+    let mut meter = crate::health::RealtimeMeter::new(
+        state.clone(),
+        source_id,
+        crate::health::StageKind::Normalizer,
+    );
 
     loop {
         let mut tag_header = [0u8; 11];
         if stdout.read_exact(&mut tag_header).await.is_err() {
             break;
         }
+        meter.observe(&tag_header);
 
         let tag_type = tag_header[0];
         let data_size = ((tag_header[1] as u32) << 16)

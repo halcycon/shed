@@ -159,15 +159,21 @@
 		}
 	}
 
+	function showVolume(id: string, volume: number) {
+		const channels = [...audioRouting.channels];
+		const idx = channels.findIndex((c) => c.source_id === id);
+		const ch = { ...channel(id), volume };
+		if (idx >= 0) channels[idx] = ch;
+		else channels.push(ch);
+		publish({ ...audioRouting, channels });
+	}
+
+	// Commit on release only: each server-side volume change rebuilds the
+	// programme mixer, so streaming every drag step would thrash ffmpeg.
 	async function setVolume(id: string, volume: number) {
+		showVolume(id, volume);
 		try {
 			await api.setSourceVolume(id, volume);
-			const channels = [...audioRouting.channels];
-			const idx = channels.findIndex((c) => c.source_id === id);
-			const ch = { ...channel(id), volume };
-			if (idx >= 0) channels[idx] = ch;
-			else channels.push(ch);
-			publish({ ...audioRouting, channels });
 		} catch (e) {
 			error = String(e);
 		}
@@ -344,7 +350,8 @@
 							step="0.05"
 							value={ch.volume}
 							class="w-20 accent-[var(--color-amber)]"
-							oninput={(e) => setVolume(source.id, Number((e.currentTarget as HTMLInputElement).value))}
+							oninput={(e) => showVolume(source.id, Number((e.currentTarget as HTMLInputElement).value))}
+							onchange={(e) => setVolume(source.id, Number((e.currentTarget as HTMLInputElement).value))}
 						/>
 						<span class="w-8 tabular-nums text-amber">{Math.round(ch.volume * 100)}</span>
 					</label>

@@ -39,16 +39,22 @@ struct CompLayer {
 ///   fill    — stretch to the box (ignores aspect)
 ///   cover   — scale to cover preserving aspect, then crop to the box
 ///   contain — scale to fit inside preserving aspect, then centre in the box
+///
+/// Scaling is bilinear: layers are mostly downscaled from the canvas-sized bus
+/// stream, where it looks the same as bicubic at roughly a third less CPU.
 fn fit_filter(fit: LayerFit, x: i32, y: i32, w: u32, h: u32) -> (String, String, String) {
     match fit {
-        LayerFit::Fill => (format!("scale={}:{}", w, h), x.to_string(), y.to_string()),
+        LayerFit::Fill => (format!("scale={}:{}:flags=bilinear", w, h), x.to_string(), y.to_string()),
         LayerFit::Cover => (
-            format!("scale={}:{}:force_original_aspect_ratio=increase,crop={}:{}", w, h, w, h),
+            format!(
+                "scale={}:{}:force_original_aspect_ratio=increase:flags=bilinear,crop={}:{}",
+                w, h, w, h
+            ),
             x.to_string(),
             y.to_string(),
         ),
         LayerFit::Contain => (
-            format!("scale={}:{}:force_original_aspect_ratio=decrease", w, h),
+            format!("scale={}:{}:force_original_aspect_ratio=decrease:flags=bilinear", w, h),
             // centre the (smaller) scaled image within the box; w/h here are the
             // overlay's post-scale dimensions, resolved by ffmpeg at runtime.
             format!("{}+({}-w)/2", x, w),
@@ -69,8 +75,10 @@ fn build_filter_graph(layers: &[CompLayer], width: u32, height: u32, fps: u32) -
         // added image starting near zero); without rebasing, overlay's framesync
         // can't pair frames across layers and the graph stalls with no output.
         if layer.opacity < 0.999 {
+            // `lut` scales alpha in YUV; colorchannelmixer would round-trip
+            // every pixel through RGB.
             graph.push(format!(
-                "[{}:v]setpts=PTS-STARTPTS,{},format=yuva420p,colorchannelmixer=aa={:.3}[l{}]",
+                "[{}:v]setpts=PTS-STARTPTS,{},format=yuva420p,lut=a=val*{:.3}[l{}]",
                 i, scale, layer.opacity, i
             ));
         } else {
@@ -84,6 +92,11 @@ fn build_filter_graph(layers: &[CompLayer], width: u32, height: u32, fps: u32) -
         prev = out;
     }
     (graph.join(";"), prev)
+}
+
+/// Append the encoder hand-off filter to a composite graph; returns the new label.
+fn finish_filter_graph(graph: String, last: &str, tail: &str) -> (String, String) {
+    (format!("{graph};[{last}]{tail}[vout]"), "vout".to_string())
 }
 
 /// Start (or restart) the compositor for a scene and publish to its media relay.
@@ -165,11 +178,14 @@ pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Res
         "-hide_banner".into(),
         "-loglevel".into(),
         "warning".into(),
+    ];
+    args.extend(crate::encoder::input_args(&cfg));
+    args.extend([
         "-fflags".into(),
         "nobuffer+genpts".into(),
         "-flags".into(),
         "low_delay".into(),
-    ];
+    ]);
     for p in &ports {
         // Bound input probing. A near-static layer (e.g. a still image) has such
         // a low bitrate that ffmpeg's default probesize/analyzeduration is never
@@ -192,6 +208,8 @@ pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Res
 
     // Build the filter graph: black canvas, then scale + overlay each layer.
     let (filter, final_label) = build_filter_graph(&layers, cfg.width, cfg.height, cfg.fps);
+    let (filter, final_label) =
+        finish_filter_graph(filter, &final_label, crate::encoder::filter_tail(&cfg));
 
     args.push("-filter_complex".into());
     args.push(filter);
@@ -199,14 +217,9 @@ pub async fn start_scene_compositor(state: Arc<AppState>, scene_id: Uuid) -> Res
     args.push(format!("[{}]", final_label));
     args.push("-an".into());
 
-    let bv = format!("{}k", cfg.video_bitrate_kbps);
-    let bufsize = format!("{}k", cfg.video_bitrate_kbps * 2);
-    let gop = format!("{}", cfg.fps * 2);
-    let fps = format!("{}", cfg.fps);
+    args.extend(crate::encoder::video_args(&cfg, &crate::encoder::Rate::canvas(&cfg)));
     for a in [
-        "-c:v", "libx264", "-preset", "veryfast", "-tune", "zerolatency", "-bf", "0",
-        "-b:v", &bv, "-maxrate", &bv, "-bufsize", &bufsize, "-g", &gop, "-r", &fps,
-        "-pix_fmt", "yuv420p", "-muxdelay", "0", "-muxpreload", "0",
+        "-muxdelay", "0", "-muxpreload", "0",
         "-f", "flv", "-flvflags", "no_duration_filesize", "pipe:1",
     ] {
         args.push(a.to_string());
@@ -287,8 +300,8 @@ async fn feed_layer(listener: TcpListener, source_id: Uuid, state: Arc<AppState>
 
     // Prime with cached sequence headers + last keyframe.
     {
-        let headers = state.sequence_headers.read().await;
-        if let Some(h) = headers.get(&source_id) {
+        let cached = state.sequence_headers.read().await.get(&source_id).cloned();
+        if let Some(h) = cached {
             if let Some(v) = &h.video {
                 let _ = sock.write_all(v).await;
             }
@@ -327,11 +340,17 @@ async fn read_composited_output(
     }
 
     let mut frame_count: u64 = 0;
+    let mut meter = crate::health::RealtimeMeter::new(
+        state.clone(),
+        scene_id,
+        crate::health::StageKind::Compositor,
+    );
     loop {
         let mut tag_header = [0u8; 11];
         if stdout.read_exact(&mut tag_header).await.is_err() {
             break;
         }
+        meter.observe(&tag_header);
         let tag_type = tag_header[0];
         let data_size = ((tag_header[1] as u32) << 16)
             | ((tag_header[2] as u32) << 8)
@@ -373,11 +392,7 @@ async fn read_composited_output(
         }
 
         if frame_count == 0 {
-            state
-                .source_states
-                .write()
-                .await
-                .insert(scene_id, muxshed_common::SourceState::Live);
+            announce_scene_live(&state, scene_id).await;
             tracing::info!("compositor: scene {} is live", scene_id);
         }
 
@@ -387,6 +402,62 @@ async fn read_composited_output(
 
     tracing::info!("compositor: scene {} ended after {} frames", scene_id, frame_count);
     state.scene_compositors.write().await.remove(&scene_id);
+}
+
+/// Mark a scene's output live and tell subscribers: each (re)start publishes on
+/// a fresh relay, so the program router must re-subscribe.
+async fn announce_scene_live(state: &AppState, scene_id: Uuid) {
+    state
+        .source_states
+        .write()
+        .await
+        .insert(scene_id, muxshed_common::SourceState::Live);
+    let _ = state.ws_tx.send(muxshed_common::WsEvent::SourceState {
+        id: scene_id,
+        state: muxshed_common::SourceState::Live,
+    });
+}
+
+/// Restart the on-air scene when one of its layer sources comes up or drops:
+/// a reconnecting guest reappears in place, and a dropped one is removed
+/// instead of stalling the composite (overlay waits on every input).
+pub async fn run_scene_supervisor(state: Arc<AppState>) {
+    use muxshed_common::SourceState;
+    let mut events = state.ws_tx.subscribe();
+    loop {
+        let (id, s) = crate::program::next_source_event(&mut events).await;
+        if !matches!(s, SourceState::Live | SourceState::Disconnected) {
+            continue;
+        }
+        let Some(scene_id) = *state.program_intent.borrow() else { continue };
+        if id == scene_id || !scene_has_layer(&state, scene_id, id).await {
+            continue;
+        }
+        // A reconnect is Disconnected then Live in quick succession, and several
+        // guests may join together: settle, then restart once.
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+        while let Ok(_) | Err(broadcast::error::TryRecvError::Lagged(_)) = events.try_recv() {}
+        if *state.program_intent.borrow() != Some(scene_id) {
+            continue;
+        }
+        tracing::info!("scene {}: layer source {} is {:?}; restarting compositor", scene_id, id, s);
+        if let Err(e) = start_scene_compositor(state.clone(), scene_id).await {
+            tracing::warn!("scene {}: {}", scene_id, e);
+        }
+    }
+}
+
+async fn scene_has_layer(state: &AppState, scene_id: Uuid, source_id: Uuid) -> bool {
+    sqlx::query_as::<_, (i64,)>(
+        "SELECT 1 FROM scene_layers WHERE scene_id = ? AND source_id = ? LIMIT 1",
+    )
+    .bind(scene_id.to_string())
+    .bind(source_id.to_string())
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten()
+    .is_some()
 }
 
 pub async fn stop_scene_compositor(state: &AppState, scene_id: &Uuid) {
@@ -431,12 +502,9 @@ async fn start_identity_forward(
         return Err("identity scene: source relay missing".to_string());
     };
     let public_tx = state.get_or_create_media_relay(scene_id).await;
-    {
-        let headers = state.sequence_headers.read().await;
-        if let Some(h) = headers.get(&source_id) {
-            let mut wh = state.sequence_headers.write().await;
-            wh.insert(scene_id, h.clone());
-        }
+    let source_headers = state.sequence_headers.read().await.get(&source_id).cloned();
+    if let Some(h) = source_headers {
+        state.sequence_headers.write().await.insert(scene_id, h);
     }
 
     let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
@@ -451,6 +519,7 @@ async fn start_identity_forward(
         "scene {}: identity forward (no compositor) from source {}",
         scene_id, source_id
     );
+    announce_scene_live(&state, scene_id).await;
 
     let st = state.clone();
     tokio::spawn(async move {
@@ -511,21 +580,21 @@ mod tests {
     #[test]
     fn fill_stretches_to_box() {
         let (g, _) = build_filter_graph(&[layer_fit(0, 0, 640, 360, LayerFit::Fill)], 1920, 1080, 30);
-        assert!(g.contains("[0:v]setpts=PTS-STARTPTS,scale=640:360[l0]"));
+        assert!(g.contains("[0:v]setpts=PTS-STARTPTS,scale=640:360:flags=bilinear[l0]"));
         assert!(g.contains("[base][l0]overlay=x=0:y=0:eof_action=pass[s0]"));
     }
 
     #[test]
     fn cover_scales_up_and_crops() {
         let (g, _) = build_filter_graph(&[layer_fit(100, 50, 640, 360, LayerFit::Cover)], 1920, 1080, 30);
-        assert!(g.contains("scale=640:360:force_original_aspect_ratio=increase,crop=640:360"));
+        assert!(g.contains("scale=640:360:force_original_aspect_ratio=increase:flags=bilinear,crop=640:360"));
         assert!(g.contains("overlay=x=100:y=50:eof_action=pass"));
     }
 
     #[test]
     fn contain_fits_inside_and_centres() {
         let (g, _) = build_filter_graph(&[layer_fit(100, 50, 640, 360, LayerFit::Contain)], 1920, 1080, 30);
-        assert!(g.contains("scale=640:360:force_original_aspect_ratio=decrease"));
+        assert!(g.contains("scale=640:360:force_original_aspect_ratio=decrease:flags=bilinear"));
         // centred within the box via runtime overlay-dimension expressions
         assert!(g.contains("overlay=x=100+(640-w)/2:y=50+(360-h)/2:eof_action=pass"));
     }
@@ -535,10 +604,10 @@ mod tests {
         let (g, out) = build_filter_graph(&[layer(0, 0, 1920, 1080, 1.0)], 1920, 1080, 30);
         assert_eq!(out, "s0");
         assert!(g.starts_with("color=c=black:s=1920x1080:r=30[base]"));
-        assert!(g.contains("[0:v]setpts=PTS-STARTPTS,scale=1920:1080[l0]"));
+        assert!(g.contains("[0:v]setpts=PTS-STARTPTS,scale=1920:1080:flags=bilinear[l0]"));
         assert!(g.contains("[base][l0]overlay=x=0:y=0:eof_action=pass[s0]"));
         // opaque layer must NOT get an alpha multiply
-        assert!(!g.contains("colorchannelmixer"));
+        assert!(!g.contains("yuva420p"));
     }
 
     #[test]
@@ -548,14 +617,14 @@ mod tests {
             1920, 1080, 30,
         );
         assert_eq!(out, "s1");
-        assert!(g.contains("[1:v]setpts=PTS-STARTPTS,scale=640:360[l1]"));
+        assert!(g.contains("[1:v]setpts=PTS-STARTPTS,scale=640:360:flags=bilinear[l1]"));
         assert!(g.contains("[s0][l1]overlay=x=1240:y=700:eof_action=pass[s1]"));
     }
 
     #[test]
     fn semi_transparent_layer_gets_alpha() {
         let (g, _) = build_filter_graph(&[layer(40, 40, 480, 270, 0.5)], 1920, 1080, 30);
-        assert!(g.contains("format=yuva420p,colorchannelmixer=aa=0.500"));
+        assert!(g.contains("format=yuva420p,lut=a=val*0.500"));
     }
 
     #[test]
@@ -569,5 +638,12 @@ mod tests {
         assert!(g.contains("[base][l0]overlay"));
         assert!(g.contains("[s0][l1]overlay"));
         assert!(g.contains("[s1][l2]overlay"));
+    }
+
+    #[test]
+    fn finish_hands_last_step_to_encoder_format() {
+        let (g, out) = finish_filter_graph("color=c=black[base]".into(), "s1", "format=yuv420p");
+        assert_eq!(out, "vout");
+        assert!(g.ends_with(";[s1]format=yuv420p[vout]"));
     }
 }

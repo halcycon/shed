@@ -12,7 +12,7 @@
 		recordingState,
 		failover,
 	} from '$lib/stores/pipeline';
-	import type { StingerConfig, BroadcastConfig, OutputConfig, OutputStats, AudioRouting, Asset } from '$lib/types';
+	import type { StingerConfig, BroadcastConfig, OutputConfig, OutputStats, AudioRouting, Asset, LoadStatus, StageLoad } from '$lib/types';
 	import StatusIndicator from '../../components/StatusIndicator.svelte';
 	import VideoPreview from '../../components/VideoPreview.svelte';
 	import ProgramMonitor from '../../components/ProgramMonitor.svelte';
@@ -161,6 +161,31 @@
 		studioChannel?.close();
 	});
 
+	// Server load: show the warning only after two overloaded polls in a row
+	// so a compositor restart or encoder warm-up doesn't flash it.
+	let load = $state<LoadStatus | null>(null);
+	let overloadedPolls = $state(0);
+	const showOverload = $derived(overloadedPolls >= 2);
+	const laggingStages = $derived(load?.stages.filter((s) => s.behind) ?? []);
+
+	onMount(() => {
+		const poll = async () => {
+			const next = await api.getLoad().catch(() => null);
+			load = next;
+			overloadedPolls = next?.overloaded ? overloadedPolls + 1 : 0;
+		};
+		poll();
+		const timer = setInterval(poll, 3000);
+		return () => clearInterval(timer);
+	});
+
+	function stageLabel(s: StageLoad): string {
+		const what = { ingest: 'ingest', normalizer: 'input', compositor: 'scene' }[s.kind];
+		return s.speed === 0
+			? `${s.name} (${what}) stalled`
+			: `${s.name} (${what}) at ${s.speed.toFixed(2)}× real time`;
+	}
+
 	function startStatsPolling() {
 		if (statsInterval) clearInterval(statsInterval);
 		statsInterval = setInterval(async () => {
@@ -269,7 +294,12 @@
 	}
 
 	function openOutput() {
-		draft = { ...outputConfig };
+		draft = {
+			video_encoder: 'software',
+			transcode_hls: false,
+			webrtc_ingest_preset: 'veryfast',
+			...outputConfig
+		};
 		const m = RES_PRESETS.find((p) => p.w === draft.width && p.h === draft.height);
 		resSelect = m ? m.label : 'custom';
 		showOutput = true;
@@ -342,10 +372,29 @@
 		</div>
 	{/if}
 
+	{#if showOverload && load}
+		<div class="mb-3 flex flex-wrap items-center gap-3 rounded border border-danger bg-danger/10 px-4 py-2 text-danger" role="status">
+			<span class="led text-[16px] animate-pulse">⚠ SERVER OVERLOADED</span>
+			<span class="text-xs">
+				{#if load.cpu_percent !== null}CPU {Math.round(load.cpu_percent)}%{/if}
+				{#each laggingStages as s (s.id)} · {stageLabel(s)}{/each}
+				— output may stutter or freeze. Lower the guest ingest speed, canvas size or bitrate, or remove scene layers.
+			</span>
+			<button onclick={openOutput} class="btn btn--ghost" style="min-height:20px;padding:1px 8px;font-size:11px">Output config</button>
+		</div>
+	{/if}
+
 	<!-- Header -->
 	<div class="mb-4 flex items-center justify-between border-b border-border pb-3">
 		<h1 class="text-[13px] tracking-widest text-amber-bright">STUDIO</h1>
 		<div class="flex items-center gap-3">
+			{#if load?.cpu_percent != null}
+				{@const cpu = Math.round(load.cpu_percent)}
+				<span
+					class="pill {cpu >= 90 || laggingStages.length > 0 ? 'pill--rec' : cpu >= 75 ? 'pill--warning' : 'pill--idle'}"
+					title="Server CPU across {load.cpu_cores} cores{laggingStages.length ? ` — ${laggingStages.map(stageLabel).join(', ')}` : ''}"
+				>CPU {cpu}%</span>
+			{/if}
 			<StatusIndicator state={$pipelineState} />
 			{#if $isLive && $pipelineState.state === 'live'}
 				<span class="led text-[18px]">{formatDuration(outputStats.duration_secs)}</span>
@@ -769,6 +818,34 @@
 					{#each [96, 128, 160, 192, 256] as a}<option value={a}>{a} kbps</option>{/each}
 				</select>
 			</div>
+			<div>
+				<label class="field-label" for="oc-enc">Video encoder</label>
+				<select id="oc-enc" bind:value={draft.video_encoder} class="select w-full">
+					<option value="software">Software (CPU, libx264)</option>
+					<option value="vaapi">Intel / AMD GPU (VA-API)</option>
+					<option value="nvenc">Nvidia GPU (NVENC)</option>
+				</select>
+				<p class="mt-1 text-[10px] text-amber-dim">
+					GPU encoders are tested when you save. Applies to sources and scenes as they next start.
+				</p>
+			</div>
+			{#if draft.video_encoder === 'software'}
+				<div>
+					<label class="field-label" for="oc-gp">Guest / WHIP ingest speed</label>
+					<select id="oc-gp" bind:value={draft.webrtc_ingest_preset} class="select w-full">
+						<option value="veryfast">Best quality (veryfast)</option>
+						<option value="superfast">Balanced (superfast, ~25% less CPU)</option>
+						<option value="ultrafast">Lightest (ultrafast, ~50% less CPU)</option>
+					</select>
+					<p class="mt-1 text-[10px] text-amber-dim">
+						Each guest runs its own encode. Applies when a guest next joins.
+					</p>
+				</div>
+			{/if}
+			<label class="flex items-center gap-2 text-xs text-amber-dim">
+				<input type="checkbox" bind:checked={draft.transcode_hls} class="accent-[var(--color-amber)]" />
+				Re-encode Channel HLS (only if the watch page shows glitches on cuts)
+			</label>
 			<div class="flex gap-2 pt-1">
 				<button onclick={saveOutput} class="btn btn--go">Save</button>
 				<button onclick={() => (showOutput = false)} class="btn btn--ghost">Cancel</button>

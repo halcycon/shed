@@ -46,8 +46,8 @@ async fn handle_preview(mut socket: WebSocket, state: Arc<AppState>, id: String)
     }
 
     // Send cached sequence headers + last keyframe so clients can render immediately
-    let headers = state.sequence_headers.read().await;
-    if let Some(seq) = headers.get(&source_id) {
+    let cached = state.sequence_headers.read().await.get(&source_id).cloned();
+    if let Some(seq) = cached {
         if let Some(ref video) = seq.video {
             if socket.send(Message::Binary(video.to_vec().into())).await.is_err() {
                 return;
@@ -64,7 +64,6 @@ async fn handle_preview(mut socket: WebSocket, state: Arc<AppState>, id: String)
             }
         }
     }
-    drop(headers);
 
     let mut frame_count: u64 = 0;
     loop {

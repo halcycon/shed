@@ -182,6 +182,7 @@ pub fn build_router(
         .route("/guests/{id}", delete(guests::delete))
         // Status and keys
         .route("/status", get(status::get_status))
+        .route("/status/load", get(status::get_load))
         .route("/keys", get(keys::list).post(keys::create))
         .route("/keys/{id}", delete(keys::delete))
         // Auth-protected user routes

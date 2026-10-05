@@ -193,12 +193,19 @@ export interface AssetFolder {
 	created_at: string;
 }
 
+export type VideoEncoder = 'software' | 'vaapi' | 'nvenc';
+export type X264Preset = 'veryfast' | 'superfast' | 'ultrafast';
+
 export interface OutputConfig {
 	video_bitrate_kbps: number;
 	audio_bitrate_kbps: number;
 	width: number;
 	height: number;
 	fps: number;
+	transcode_egress?: boolean;
+	transcode_hls?: boolean;
+	video_encoder?: VideoEncoder;
+	webrtc_ingest_preset?: X264Preset;
 }
 
 export interface FailoverConfig {
@@ -216,6 +223,21 @@ export interface IceServer {
 
 export interface WebrtcConfig {
 	ice_servers: IceServer[];
+}
+
+export interface StageLoad {
+	id: string;
+	name: string;
+	kind: 'ingest' | 'normalizer' | 'compositor';
+	speed: number;
+	behind: boolean;
+}
+
+export interface LoadStatus {
+	cpu_percent: number | null;
+	cpu_cores: number;
+	overloaded: boolean;
+	stages: StageLoad[];
 }
 
 export interface OutputStats {

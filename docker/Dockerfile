@@ -53,10 +53,15 @@ RUN npm run build
 # --- Runtime ---
 FROM ubuntu:24.04
 
+# VA-API drivers back the optional hardware encoder (Output → Encoder: VAAPI):
+# intel-media-va-driver for Intel Gen8+, mesa-va-drivers for AMD. They are only
+# used when /dev/dri is passed into the container.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     ca-certificates \
     wget \
+    intel-media-va-driver \
+    mesa-va-drivers \
     && rm -rf /var/lib/apt/lists/*
 
 COPY --from=rust-builder /usr/local/bin/muxshed-api /usr/local/bin/

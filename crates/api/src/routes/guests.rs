@@ -109,13 +109,28 @@ pub async fn delete(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> Result<StatusCode, ApiError> {
-    let result = sqlx::query("DELETE FROM guests WHERE id = ?")
+    let source_id = sqlx::query_as::<_, (Option<String>,)>("SELECT source_id FROM guests WHERE id = ?")
+        .bind(&id)
+        .fetch_optional(&state.db)
+        .await?
+        .ok_or_else(|| MuxshedError::NotFound(format!("guest {}", id)))?
+        .0
+        .and_then(|s| s.parse::<Uuid>().ok());
+
+    sqlx::query("DELETE FROM guests WHERE id = ?")
         .bind(&id)
         .execute(&state.db)
         .await?;
 
-    if result.rows_affected() == 0 {
-        return Err(MuxshedError::NotFound(format!("guest {}", id)).into());
+    // The guest's source outlives their connections, so remove it with the
+    // guest (this also drops its scene layers).
+    if let Some(sid) = source_id {
+        crate::guest_webrtc::stop_guest_ingest(&state, &sid).await;
+        sqlx::query("DELETE FROM sources WHERE id = ?")
+            .bind(sid.to_string())
+            .execute(&state.db)
+            .await?;
+        state.source_states.write().await.remove(&sid);
     }
 
     Ok(StatusCode::NO_CONTENT)
@@ -172,7 +187,7 @@ pub async fn public_info(
 
 /// WHIP endpoint — a guest publishes their camera/mic here over WebRTC.
 ///
-/// Creates an ephemeral `web_rtc` Source for the guest, terminates the peer, and
+/// Reuses (or on first join creates) the guest's `web_rtc` Source, terminates the peer, and
 /// bridges the guest's RTP into the media relay via FFmpeg (see
 /// `crate::guest_webrtc`). Returns the SDP answer per the WHIP spec. The live
 /// media path is verifiable only against a real browser; see `docs/guests-webrtc.md`.
@@ -181,37 +196,65 @@ pub async fn whip(
     Path(token): Path<String>,
     offer: String,
 ) -> Response {
-    let guest = sqlx::query_as::<_, (String,)>("SELECT name FROM guests WHERE token = ?")
-        .bind(&token)
-        .fetch_optional(&state.db)
-        .await
-        .ok()
-        .flatten();
+    let guest = sqlx::query_as::<_, (String, Option<String>)>(
+        "SELECT name, source_id FROM guests WHERE token = ?",
+    )
+    .bind(&token)
+    .fetch_optional(&state.db)
+    .await
+    .ok()
+    .flatten();
 
-    let Some((name,)) = guest else {
+    let Some((name, existing_source)) = guest else {
         return (StatusCode::NOT_FOUND, "guest link not found").into_response();
     };
 
-    // Ephemeral source row so the guest appears in the switcher while connected.
-    let source_id = Uuid::new_v4();
-    let kind = muxshed_common::SourceKind::WebRtc {
-        token: token.clone(),
+    // One source per guest, kept across reconnects so the guest's scene layers
+    // and mixer settings survive a dropped connection.
+    let existing_source = match existing_source.and_then(|s| s.parse::<Uuid>().ok()) {
+        Some(id) => sqlx::query_as::<_, (String,)>("SELECT id FROM sources WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .map(|_| id),
+        None => None,
     };
-    let kind_json = match serde_json::to_string(&kind) {
-        Ok(j) => j,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    let source_id = match existing_source {
+        Some(id) => {
+            // A rejoin can arrive before the old peer has been torn down.
+            if state.guest_peers.read().await.contains_key(&id) {
+                tracing::info!("guest {} rejoined; replacing previous connection", id);
+                crate::guest_webrtc::stop_guest_ingest(&state, &id).await;
+            }
+            id
+        }
+        None => {
+            let id = Uuid::new_v4();
+            let kind = muxshed_common::SourceKind::WebRtc {
+                token: token.clone(),
+            };
+            let kind_json = match serde_json::to_string(&kind) {
+                Ok(j) => j,
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+                }
+            };
+            if sqlx::query("INSERT INTO sources (id, name, kind) VALUES (?, ?, ?)")
+                .bind(id.to_string())
+                .bind(format!("{} (guest)", name))
+                .bind(&kind_json)
+                .execute(&state.db)
+                .await
+                .is_err()
+            {
+                return (StatusCode::INTERNAL_SERVER_ERROR, "could not create source")
+                    .into_response();
+            }
+            id
+        }
     };
-
-    if sqlx::query("INSERT INTO sources (id, name, kind) VALUES (?, ?, ?)")
-        .bind(source_id.to_string())
-        .bind(format!("{} (guest)", name))
-        .bind(&kind_json)
-        .execute(&state.db)
-        .await
-        .is_err()
-    {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "could not create source").into_response();
-    }
 
     let _ = sqlx::query("UPDATE guests SET status = 'connecting', source_id = ? WHERE token = ?")
         .bind(source_id.to_string())

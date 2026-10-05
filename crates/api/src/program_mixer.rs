@@ -22,7 +22,7 @@ const FLV_TAG_AUDIO: u8 = 8;
 const FLV_TAG_VIDEO: u8 = 9;
 
 /// One unmuted audio contribution into the programme mix.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct MixLeg {
     pub source_id: Uuid,
     pub volume: f32,
@@ -206,8 +206,8 @@ async fn feed_source_flv(listener: TcpListener, source_id: Uuid, state: Arc<AppS
     };
     let mut rx = relay.subscribe();
     {
-        let headers = state.sequence_headers.read().await;
-        if let Some(h) = headers.get(&source_id) {
+        let cached = state.sequence_headers.read().await.get(&source_id).cloned();
+        if let Some(h) = cached {
             if let Some(v) = &h.video {
                 let _ = sock.write_all(v).await;
             }

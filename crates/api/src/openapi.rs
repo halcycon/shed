@@ -29,6 +29,7 @@ impl Modify for SecurityAddon {
     security(("api_key" = [])),
     paths(
         crate::routes::status::get_status,
+        crate::routes::status::get_load,
         crate::routes::sources::list,
         crate::routes::sources::create,
         crate::routes::sources::create_from_asset,
@@ -104,6 +105,9 @@ impl Modify for SecurityAddon {
         muxshed_common::ChannelConfig,
         muxshed_common::ChannelInfo,
         crate::routes::status::StatusResponse,
+        crate::routes::status::LoadResponse,
+        crate::routes::status::StageLoad,
+        crate::health::StageKind,
         crate::routes::sources::CreateSource,
         crate::routes::sources::UpdateSource,
         crate::routes::sources::CreateFromAsset,

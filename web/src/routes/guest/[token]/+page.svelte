@@ -8,7 +8,15 @@
 
 	const token = $derived($page.params.token);
 
-	type Mode = 'loading' | 'invalid' | 'ready' | 'joining' | 'live' | 'pending' | 'error';
+	type Mode =
+		| 'loading'
+		| 'invalid'
+		| 'ready'
+		| 'joining'
+		| 'live'
+		| 'reconnecting'
+		| 'pending'
+		| 'error';
 	let mode = $state<Mode>('loading');
 	let guestName = $state('');
 	let message = $state('');
@@ -65,8 +73,14 @@
 		if (processVideoEl && rawStream) processVideoEl.srcObject = rawStream;
 	});
 
-	onMount(init);
+	onMount(() => {
+		window.addEventListener('online', onBrowserOnline);
+		void init();
+	});
 	onDestroy(() => {
+		wantLive = false;
+		clearReconnectTimers();
+		if (typeof window !== 'undefined') window.removeEventListener('online', onBrowserOnline);
 		teardownMedia();
 		pc?.close();
 		pc = null;
@@ -125,8 +139,15 @@
 		const prevVideo = rawVideoTrack;
 		const prevAudio = microphoneTrack;
 
+		// Without a size hint Chrome captures 640x480, which the studio has to
+		// upscale and pillarbox onto its 16:9 canvas.
+		const video: MediaTrackConstraints = {
+			width: { ideal: 1280 },
+			height: { ideal: 720 },
+			frameRate: { ideal: 30, max: 30 }
+		};
 		const stream = await navigator.mediaDevices.getUserMedia({
-			video: camId ? { deviceId: { exact: camId } } : true,
+			video: camId ? { ...video, deviceId: { exact: camId } } : video,
 			audio: micId ? { deviceId: { exact: micId } } : true
 		});
 
@@ -301,46 +322,108 @@
 		});
 	}
 
-	async function join() {
+	/** True from "Join" until the guest leaves; drives automatic reconnects. */
+	let wantLive = false;
+	let reconnectAttempt = $state(0);
+	let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+	let unstableTimer: ReturnType<typeof setTimeout> | null = null;
+	/** How long "disconnected" may last before we rebuild the connection. */
+	const UNSTABLE_MS = 5000;
+	const MAX_RETRY_MS = 30000;
+
+	function clearReconnectTimers() {
+		if (reconnectTimer) clearTimeout(reconnectTimer);
+		if (unstableTimer) clearTimeout(unstableTimer);
+		reconnectTimer = null;
+		unstableTimer = null;
+	}
+
+	function scheduleReconnect() {
+		if (!wantLive) return;
+		clearReconnectTimers();
+		pc?.close();
+		pc = null;
+		mode = 'reconnecting';
+		const delay = Math.min(2000 * 2 ** reconnectAttempt, MAX_RETRY_MS);
+		reconnectAttempt += 1;
+		reconnectTimer = setTimeout(() => void join(true), delay);
+	}
+
+	function onBrowserOnline() {
+		if (mode !== 'reconnecting') return;
+		clearReconnectTimers();
+		void join(true);
+	}
+
+	async function join(retry = false) {
 		const videoTrack = outboundVideoTrack();
 		if (!videoTrack || !microphoneTrack) return;
-		mode = 'joining';
+		if (!retry) {
+			wantLive = true;
+			reconnectAttempt = 0;
+			mode = 'joining';
+		}
 		message = '';
+		const peer = new RTCPeerConnection({ iceServers });
+		pc = peer;
 		try {
-			pc = new RTCPeerConnection({ iceServers });
-			pc.addTrack(videoTrack, new MediaStream([videoTrack]));
-			pc.addTrack(microphoneTrack, new MediaStream([microphoneTrack]));
+			peer.addTrack(videoTrack, new MediaStream([videoTrack]));
+			peer.addTrack(microphoneTrack, new MediaStream([microphoneTrack]));
 
-			pc.onconnectionstatechange = () => {
-				const s = pc?.connectionState;
+			peer.onconnectionstatechange = () => {
+				if (peer !== pc) return;
+				const s = peer.connectionState;
 				if (s === 'connected') {
+					clearReconnectTimers();
+					reconnectAttempt = 0;
 					mode = 'live';
+				} else if (s === 'disconnected' && wantLive) {
+					// Often a brief blip that recovers by itself; rebuild only if it lasts.
+					mode = 'reconnecting';
+					if (!unstableTimer) {
+						unstableTimer = setTimeout(() => {
+							unstableTimer = null;
+							if (peer === pc && peer.connectionState !== 'connected') scheduleReconnect();
+						}, UNSTABLE_MS);
+					}
 				} else if (s === 'failed') {
-					message = 'Connection failed — check your network, or set a TURN server.';
-					mode = 'error';
-				} else if ((s === 'disconnected' || s === 'closed') && mode === 'live') {
-					mode = 'ready';
+					if (wantLive) {
+						scheduleReconnect();
+					} else {
+						message = 'Connection failed — check your network, or set a TURN server.';
+						mode = 'error';
+					}
 				}
 			};
 
-			await pc.setLocalDescription(await pc.createOffer());
-			await waitForIceGathering(pc);
+			await peer.setLocalDescription(await peer.createOffer());
+			await waitForIceGathering(peer);
+			if (peer !== pc) return;
 
-			if (import.meta.env.DEV && pc.localDescription?.sdp) {
-				const hasOpus = /opus\/48000/i.test(pc.localDescription.sdp);
+			if (import.meta.env.DEV && peer.localDescription?.sdp) {
+				const hasOpus = /opus\/48000/i.test(peer.localDescription.sdp);
 				console.debug('[guestux] offer contains Opus:', hasOpus);
 			}
 
 			const res = await fetch(`/api/v1/guest/${token}/whip`, {
 				method: 'POST',
 				headers: { 'Content-Type': 'application/sdp' },
-				body: pc.localDescription?.sdp ?? ''
+				body: peer.localDescription?.sdp ?? ''
 			});
+			if (peer !== pc) return;
 
 			if (res.status === 503) {
-				pc.close();
+				wantLive = false;
+				peer.close();
 				pc = null;
 				mode = 'pending';
+				return;
+			}
+			if (res.status === 404) {
+				wantLive = false;
+				peer.close();
+				pc = null;
+				mode = 'invalid';
 				return;
 			}
 			if (!res.ok) throw new Error(`server returned ${res.status}`);
@@ -350,14 +433,22 @@
 				const m = answer.match(/a=rtpmap:(\d+) opus\/48000/i);
 				console.debug('[guestux] answer Opus PT:', m?.[1] ?? 'not found');
 			}
-			await pc.setRemoteDescription({ type: 'answer', sdp: answer });
+			await peer.setRemoteDescription({ type: 'answer', sdp: answer });
 		} catch (e) {
+			if (peer !== pc) return;
+			if (wantLive && retry) {
+				scheduleReconnect();
+				return;
+			}
+			wantLive = false;
 			message = e instanceof Error ? e.message : 'Could not connect.';
 			mode = 'error';
 		}
 	}
 
 	function disconnect() {
+		wantLive = false;
+		clearReconnectTimers();
 		pc?.close();
 		pc = null;
 		mode = 'ready';
@@ -407,6 +498,8 @@
 					<span class="pill pill--live"><span class="tally">●</span> ON AIR</span>
 				{:else if mode === 'joining'}
 					<span class="pill pill--idle animate-pulse">○ connecting</span>
+				{:else if mode === 'reconnecting'}
+					<span class="pill pill--warning animate-pulse">○ reconnecting</span>
 				{:else}
 					<span class="pill pill--idle">○ {guestName}</span>
 				{/if}
@@ -504,7 +597,7 @@
 			</div>
 
 			{#if mode === 'ready'}
-				<button class="btn btn--go w-full" onclick={join}>● Join the broadcast</button>
+				<button class="btn btn--go w-full" onclick={() => join()}>● Join the broadcast</button>
 				<p class="text-center text-[12px] text-amber-muted">
 					Pick your camera and mic above, then join when you're ready.
 				</p>
@@ -514,6 +607,14 @@
 			{:else if mode === 'live'}
 				<p class="text-center text-sm text-live-glow">● You are live in the studio.</p>
 				<button class="btn btn--danger w-full" onclick={disconnect}>Disconnect</button>
+			{:else if mode === 'reconnecting'}
+				<p class="text-center text-sm text-warning animate-pulse">
+					Connection lost — reconnecting{reconnectAttempt > 1 ? ` (attempt ${reconnectAttempt})` : ''}…
+				</p>
+				<p class="text-center text-[12px] text-amber-muted">
+					Stay on this page; you'll rejoin the studio automatically.
+				</p>
+				<button class="btn w-full" onclick={disconnect}>Leave</button>
 			{:else if mode === 'pending'}
 				<div class="panel">
 					<div class="panel__body text-center">

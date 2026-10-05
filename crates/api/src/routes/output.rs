@@ -8,6 +8,40 @@ use std::sync::Arc;
 use crate::error::ApiError;
 use crate::state::AppState;
 
+/// H.264 encoder used by every ffmpeg stage that encodes video.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum VideoEncoder {
+    /// libx264 on the CPU.
+    #[default]
+    Software,
+    /// Intel / AMD GPU via VA-API (`/dev/dri` must be passed into the container).
+    Vaapi,
+    /// Nvidia GPU via NVENC (needs the Nvidia container runtime).
+    Nvenc,
+}
+
+/// libx264 speed preset. Faster presets cost less CPU for slightly lower
+/// quality at the same bitrate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, utoipa::ToSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum X264Preset {
+    #[default]
+    Veryfast,
+    Superfast,
+    Ultrafast,
+}
+
+impl X264Preset {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            X264Preset::Veryfast => "veryfast",
+            X264Preset::Superfast => "superfast",
+            X264Preset::Ultrafast => "ultrafast",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct OutputConfig {
     pub video_bitrate_kbps: u32,
@@ -19,6 +53,16 @@ pub struct OutputConfig {
     /// remux (`-c copy`) to match Muxshed's no-transcode fan-out model.
     #[serde(default)]
     pub transcode_egress: bool,
+    /// When true, Channel HLS re-encodes the programme. Default false: the bus
+    /// is already canvas-sized H.264+AAC, so segment it with `-c copy`.
+    #[serde(default)]
+    pub transcode_hls: bool,
+    #[serde(default)]
+    pub video_encoder: VideoEncoder,
+    /// Software-encoder preset for guest and WHIP ingest. Every guest runs its
+    /// own canvas-sized encode, so this is the biggest per-guest CPU lever.
+    #[serde(default)]
+    pub webrtc_ingest_preset: X264Preset,
 }
 
 impl Default for OutputConfig {
@@ -30,7 +74,23 @@ impl Default for OutputConfig {
             height: 1080,
             fps: 30,
             transcode_egress: false,
+            transcode_hls: false,
+            video_encoder: VideoEncoder::Software,
+            webrtc_ingest_preset: X264Preset::Veryfast,
         }
+    }
+}
+
+impl OutputConfig {
+    /// Load the persisted output config (defaults when unset or unreadable).
+    pub async fn load(state: &AppState) -> Self {
+        sqlx::query_as::<_, (String,)>("SELECT value FROM settings WHERE key = 'output_config'")
+            .fetch_optional(&state.db)
+            .await
+            .ok()
+            .flatten()
+            .and_then(|(json,)| serde_json::from_str(&json).ok())
+            .unwrap_or_default()
     }
 }
 
@@ -88,6 +148,10 @@ pub async fn set_config(
     config.fps = config.fps.clamp(1, 60);
     config.video_bitrate_kbps = config.video_bitrate_kbps.clamp(500, 20000);
     config.audio_bitrate_kbps = config.audio_bitrate_kbps.clamp(32, 320);
+
+    crate::encoder::probe(&config)
+        .await
+        .map_err(muxshed_common::MuxshedError::BadRequest)?;
 
     let json = serde_json::to_string(&config)
         .map_err(|e| muxshed_common::MuxshedError::Internal(e.to_string()))?;

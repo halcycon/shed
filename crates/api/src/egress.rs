@@ -126,21 +126,19 @@ impl EgressManager {
                     cfg.width, cfg.height, cfg.fps, cfg.video_bitrate_kbps, dest.name
                 );
                 let vf = format!(
-                    "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
-                    cfg.width, cfg.height, cfg.width, cfg.height
+                    "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,{}",
+                    cfg.width,
+                    cfg.height,
+                    cfg.width,
+                    cfg.height,
+                    crate::encoder::filter_tail(&cfg)
                 );
+                // Hardware device setup is a global option, so it must precede `-i`.
+                let input_at = args.iter().position(|a| a == "-i").unwrap_or(args.len());
+                args.splice(input_at..input_at, crate::encoder::input_args(&cfg));
+                args.extend(["-vf".to_string(), vf]);
+                args.extend(crate::encoder::video_args(&cfg, &crate::encoder::Rate::canvas(&cfg)));
                 args.extend([
-                    "-vf".to_string(), vf,
-                    "-c:v".to_string(), "libx264".to_string(),
-                    "-preset".to_string(), "veryfast".to_string(),
-                    "-tune".to_string(), "zerolatency".to_string(),
-                    "-bf".to_string(), "0".to_string(),
-                    "-b:v".to_string(), format!("{}k", cfg.video_bitrate_kbps),
-                    "-maxrate".to_string(), format!("{}k", cfg.video_bitrate_kbps),
-                    "-bufsize".to_string(), format!("{}k", cfg.video_bitrate_kbps * 2),
-                    "-g".to_string(), format!("{}", cfg.fps * 2),
-                    "-r".to_string(), format!("{}", cfg.fps),
-                    "-pix_fmt".to_string(), "yuv420p".to_string(),
                     "-c:a".to_string(), "aac".to_string(),
                     "-b:a".to_string(), format!("{}k", cfg.audio_bitrate_kbps),
                     "-ar".to_string(), "48000".to_string(),

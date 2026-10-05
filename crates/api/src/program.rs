@@ -183,12 +183,39 @@ fn needs_ffmpeg_mixer(routing: &crate::state::AudioRouting, legs: &[MixLeg]) -> 
     legs.iter().any(|l| (l.volume - 1.0).abs() > 0.02)
 }
 
+/// Wait until audio routing has been quiet for a short window, so a burst of
+/// updates (e.g. a fader drag) costs one mixer restart. False if the sender is gone.
+async fn settle_routing(rx: &mut watch::Receiver<crate::state::AudioRouting>) -> bool {
+    loop {
+        match tokio::time::timeout(std::time::Duration::from_millis(300), rx.changed()).await {
+            Ok(Ok(())) => continue,
+            Ok(Err(_)) => return false,
+            Err(_) => return true,
+        }
+    }
+}
+
+/// Wait for the next source state change. A source that goes Live has a fresh
+/// relay, so anything subscribed to its previous relay must re-subscribe.
+pub(crate) async fn next_source_event(
+    rx: &mut broadcast::Receiver<muxshed_common::WsEvent>,
+) -> (Uuid, SourceState) {
+    loop {
+        match rx.recv().await {
+            Ok(muxshed_common::WsEvent::SourceState { id, state }) => return (id, state),
+            Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(broadcast::error::RecvError::Closed) => std::future::pending::<()>().await,
+        }
+    }
+}
+
 /// Runs the program router: takes video from program_source, audio from audio routing.
 /// Guarantees a gapless output stream by keeping the old source running until
 /// the new source produces a keyframe.
 pub async fn run_program_router(state: Arc<AppState>) {
     let mut source_rx = state.program_source.subscribe();
     let mut audio_routing_rx = state.audio_routing.subscribe();
+    let mut events_rx = state.ws_tx.subscribe();
     let mut output_ts: u32 = 0;
 
     loop {
@@ -222,19 +249,43 @@ pub async fn run_program_router(state: Arc<AppState>) {
                     tracing::warn!("program mixer stopped: {e}");
                 }
             });
-            tokio::select! {
-                result = source_rx.changed() => {
-                    if result.is_err() {
-                        let _ = cancel_tx.send(true);
-                        let _ = join.await;
-                        return;
+            // Keep the running mixer until a change actually alters the mix:
+            // every respawn costs an ffmpeg start-up and an audio gap.
+            loop {
+                tokio::select! {
+                    result = source_rx.changed() => {
+                        if result.is_err() {
+                            let _ = cancel_tx.send(true);
+                            let _ = join.await;
+                            return;
+                        }
+                        break;
                     }
-                }
-                result = audio_routing_rx.changed() => {
-                    if result.is_err() {
-                        let _ = cancel_tx.send(true);
-                        let _ = join.await;
-                        return;
+                    result = audio_routing_rx.changed() => {
+                        if result.is_err() || !settle_routing(&mut audio_routing_rx).await {
+                            let _ = cancel_tx.send(true);
+                            let _ = join.await;
+                            return;
+                        }
+                        let routing = audio_routing_rx.borrow().clone();
+                        let next = resolve_audio_legs(&state, current_source_id, &routing).await;
+                        if next == legs && needs_ffmpeg_mixer(&routing, &next) {
+                            continue;
+                        }
+                        break;
+                    }
+                    (id, s) = next_source_event(&mut events_rx) => {
+                        // A reconnect replaces the source's relay, so the mixer's
+                        // feed for it would stall; joins and drops change Mix legs.
+                        let reconnected = s == SourceState::Live
+                            && (id == current_source_id || legs.iter().any(|l| l.source_id == id));
+                        let routing = audio_routing_rx.borrow().clone();
+                        let next = resolve_audio_legs(&state, current_source_id, &routing).await;
+                        if !reconnected && next == legs && needs_ffmpeg_mixer(&routing, &next) {
+                            continue;
+                        }
+                        tracing::info!("program router: source {} is {:?}; rebuilding mixer", id, s);
+                        break;
                     }
                 }
             }
@@ -273,7 +324,17 @@ pub async fn run_program_router(state: Arc<AppState>) {
 
         let Some(video_tx) = video_relay else {
             tracing::warn!("program router: no relay for video source {}", current_source_id);
-            if source_rx.changed().await.is_err() { return; }
+            loop {
+                tokio::select! {
+                    result = source_rx.changed() => {
+                        if result.is_err() { return; }
+                        break;
+                    }
+                    (id, s) = next_source_event(&mut events_rx) => {
+                        if id == current_source_id && s == SourceState::Live { break; }
+                    }
+                }
+            }
             continue;
         };
 
@@ -324,9 +385,42 @@ pub async fn run_program_router(state: Arc<AppState>) {
                 // Audio routing changed
                 result = audio_routing_rx.changed() => {
                     if result.is_err() { return; }
-                    // Re-enter outer loop to reconfigure audio
+                    // Restarting drops video until the next keyframe, so only
+                    // re-enter the outer loop when programme audio really changes.
+                    let routing = audio_routing_rx.borrow_and_update().clone();
+                    let next = resolve_audio_legs(&state, current_source_id, &routing).await;
+                    if next == legs && !needs_ffmpeg_mixer(&routing, &next) {
+                        continue;
+                    }
                     tracing::info!("program router: audio routing change");
                     break;
+                }
+                // A source (re)started or dropped.
+                (id, s) = next_source_event(&mut events_rx) => {
+                    if s == SourceState::Live
+                        && (id == current_source_id || (audio_rx.is_some() && id == audio_source_id))
+                    {
+                        // Its relay was replaced; the one we hold will never carry data again.
+                        tracing::info!("program router: source {} reconnected; resubscribing", id);
+                        break;
+                    }
+                    if s == SourceState::Live {
+                        if let Some(ps) = pending_switch.as_mut().filter(|ps| ps.source_id == id) {
+                            if let Some(relay) = state.get_media_relay(&id).await {
+                                ps.rx = relay.subscribe();
+                            }
+                        } else if pending_switch.is_none() && *source_rx.borrow() == Some(id) {
+                            // Cut to a source that was offline at the time; it is up now.
+                            tracing::info!("program router: selected source {} came up; switching", id);
+                            break;
+                        }
+                    }
+                    let routing = audio_routing_rx.borrow().clone();
+                    let next = resolve_audio_legs(&state, current_source_id, &routing).await;
+                    if next != legs || needs_ffmpeg_mixer(&routing, &next) {
+                        tracing::info!("program router: source {} is {:?}; audio legs changed", id, s);
+                        break;
+                    }
                 }
                 // New source data (when switch is pending)
                 msg = async {

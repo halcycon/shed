@@ -5,6 +5,8 @@ pub mod auth;
 pub mod channel_hls;
 pub mod openapi;
 pub mod egress;
+pub mod encoder;
+pub mod health;
 pub mod failover;
 pub mod guest_webrtc;
 pub mod webrtc_ingest;

@@ -94,6 +94,7 @@ async fn monitor(
 
     let mut ticker = tokio::time::interval(Duration::from_millis(250));
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let mut events_rx = state.ws_tx.subscribe();
 
     loop {
         tokio::select! {
@@ -101,6 +102,12 @@ async fn monitor(
             r = intent_rx.changed() => {
                 let _ = r;
                 return;
+            }
+            // The intended source reconnected on a fresh relay.
+            (id, s) = crate::program::next_source_event(&mut events_rx) => {
+                if id == intended && s == muxshed_common::SourceState::Live {
+                    rx = state.get_media_relay(&intended).await.map(|t| t.subscribe());
+                }
             }
             // Frames from the intended source.
             msg = async {

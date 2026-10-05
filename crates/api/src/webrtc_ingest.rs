@@ -11,7 +11,7 @@
 
 use bytes::Bytes;
 use std::process::Stdio;
-use std::sync::Arc;
+use std::sync::{Arc, Weak};
 use std::time::Duration;
 use tokio::io::AsyncReadExt;
 use tokio::net::UdpSocket;
@@ -59,6 +59,10 @@ pub enum VideoCodec {
 const VP8_PT: u8 = 96;
 const H264_PT: u8 = 97;
 const OPUS_PT: u8 = 111;
+
+/// How long a peer may sit in "disconnected" before we treat it as gone. Short
+/// network blips usually recover well inside this.
+const DISCONNECT_GRACE: Duration = Duration::from_secs(15);
 
 impl VideoCodec {
     /// Map a track's negotiated mime type (e.g. "video/H264") to a codec.
@@ -144,19 +148,39 @@ pub async fn start_ingest(
             .map_err(|e| format!("udp bind: {}", e))?,
     );
 
-    // Tear the ingest down when the peer drops.
+    // Tear the ingest down when the peer drops. "Disconnected" is often a
+    // transient blip on home connections, so give it a grace period first.
     let st = state.clone();
+    let this_pc = Arc::downgrade(&pc);
     pc.on_peer_connection_state_change(Box::new(move |s: RTCPeerConnectionState| {
         let st = st.clone();
+        let this_pc = this_pc.clone();
         Box::pin(async move {
             tracing::info!("ingest {} peer state: {:?}", source_id, s);
-            if matches!(
-                s,
-                RTCPeerConnectionState::Failed
-                    | RTCPeerConnectionState::Disconnected
-                    | RTCPeerConnectionState::Closed
-            ) {
-                stop_ingest(&st, &source_id, kind).await;
+            match s {
+                RTCPeerConnectionState::Failed | RTCPeerConnectionState::Closed => {
+                    stop_ingest_if_current(&st, &source_id, kind, &this_pc).await;
+                }
+                RTCPeerConnectionState::Disconnected => {
+                    tokio::spawn(async move {
+                        tokio::time::sleep(DISCONNECT_GRACE).await;
+                        let still_down = this_pc.upgrade().is_some_and(|pc| {
+                            matches!(
+                                pc.connection_state(),
+                                RTCPeerConnectionState::Disconnected | RTCPeerConnectionState::Failed
+                            )
+                        });
+                        if still_down {
+                            tracing::warn!(
+                                "ingest {} still disconnected after {}s; tearing down",
+                                source_id,
+                                DISCONNECT_GRACE.as_secs()
+                            );
+                            stop_ingest_if_current(&st, &source_id, kind, &this_pc).await;
+                        }
+                    });
+                }
+                _ => {}
             }
         })
     }));
@@ -210,7 +234,7 @@ pub async fn start_ingest(
                         audio_port,
                         pump_fwd.clone(),
                         source_id,
-                        Arc::downgrade(&pc),
+                        pump_pc.clone(),
                         pump_state.clone(),
                         public_tx.clone(),
                         pump_started.clone(),
@@ -223,6 +247,7 @@ pub async fn start_ingest(
         }
     });
 
+    let watchdog_pc = Arc::downgrade(&pc);
     state.guest_peers.write().await.insert(source_id, pc);
 
     // Reap the ingest if it never goes live (abandoned publish, or ICE never
@@ -236,7 +261,7 @@ pub async fn start_ingest(
         );
         if !live {
             tracing::warn!("ingest {} did not go live within 30s; tearing down", source_id);
-            stop_ingest(&watchdog, &source_id, kind).await;
+            stop_ingest_if_current(&watchdog, &source_id, kind, &watchdog_pc).await;
         }
     });
 
@@ -291,40 +316,52 @@ fn forward_track(
                 .is_ok()
             {
                 tracing::info!("ingest {}: negotiated video codec {:?}", source_id, codec);
-                if let Err(e) =
-                    start_ffmpeg(state.clone(), source_id, video_port, audio_port, codec, public_tx, kind)
-                        .await
+                if let Err(e) = start_ffmpeg(
+                    state.clone(),
+                    source_id,
+                    video_port,
+                    audio_port,
+                    codec,
+                    public_tx,
+                    kind,
+                    &pli_pc,
+                )
+                .await
                 {
                     tracing::error!("ingest {}: ffmpeg start failed: {}", source_id, e);
-                    stop_ingest(&state, &source_id, kind).await;
+                    stop_ingest_if_current(&state, &source_id, kind, &pli_pc).await;
                     return;
                 }
             }
 
-            // Drive periodic keyframe requests (VP8 and H.264 both decode from one).
+            // Keyframes are large, and forcing them on a schedule makes weak
+            // uplinks stutter. Ask every second only until ffmpeg is decoding;
+            // after that, only when packet loss was not repaired by NACK.
             let ssrc = track.ssrc();
             let pli = pli_pc.clone();
+            let startup_state = state.clone();
             tokio::spawn(async move {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(2)).await;
-                    let Some(pc) = pli.upgrade() else { break };
-                    if pc
-                        .write_rtcp(&[Box::new(PictureLossIndication {
-                            sender_ssrc: 0,
-                            media_ssrc: ssrc,
-                        })])
-                        .await
-                        .is_err()
-                    {
+                for _ in 0..30 {
+                    let live = matches!(
+                        startup_state.source_states.read().await.get(&source_id),
+                        Some(muxshed_common::SourceState::Live)
+                    );
+                    if live || !send_pli(&pli, ssrc).await {
                         break;
                     }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
             });
 
             // Forward the first packet we already read, then the rest.
             let mut n: u64 = 0;
             let mut packet = first;
+            let mut loss = LossTracker::default();
             loop {
+                if loss.observe(packet.header.sequence_number, std::time::Instant::now()) {
+                    tracing::debug!("ingest {}: unrecovered packet loss; requesting keyframe", source_id);
+                    send_pli(&pli_pc, ssrc).await;
+                }
                 packet.header.payload_type = pt;
                 if let Ok(raw) = packet.marshal() {
                     if fwd.send_to(&raw, &addr).await.is_err() {
@@ -353,6 +390,70 @@ fn forward_track(
             tracing::info!("ingest {}: {} track ended after {} packets", source_id, kind_label, n);
         }
     });
+}
+
+/// Ask the publisher for a keyframe. False once the peer is gone.
+async fn send_pli(pc: &Weak<RTCPeerConnection>, media_ssrc: u32) -> bool {
+    let Some(pc) = pc.upgrade() else { return false };
+    pc.write_rtcp(&[Box::new(PictureLossIndication {
+        sender_ssrc: 0,
+        media_ssrc,
+    })])
+    .await
+    .is_ok()
+}
+
+/// How long a lost RTP packet may stay missing before we assume NACK
+/// retransmission failed and the decoder needs a keyframe.
+const LOSS_REPAIR_WINDOW: Duration = Duration::from_millis(250);
+/// Minimum spacing between loss-triggered keyframe requests.
+const LOSS_PLI_INTERVAL: Duration = Duration::from_secs(2);
+const LOSS_MAX_TRACKED: usize = 512;
+
+/// Tracks RTP sequence gaps on one stream and decides when a keyframe request
+/// is warranted: only for loss that retransmission did not fill in time.
+#[derive(Default)]
+struct LossTracker {
+    expected: Option<u16>,
+    missing: std::collections::VecDeque<(u16, std::time::Instant)>,
+    last_pli: Option<std::time::Instant>,
+}
+
+impl LossTracker {
+    /// Record a received sequence number; true when a keyframe should be requested.
+    fn observe(&mut self, seq: u16, now: std::time::Instant) -> bool {
+        match self.expected {
+            None => self.expected = Some(seq.wrapping_add(1)),
+            Some(exp) => {
+                let ahead = seq.wrapping_sub(exp);
+                if ahead == 0 {
+                    self.expected = Some(seq.wrapping_add(1));
+                } else if ahead < 0x8000 {
+                    for i in 0..ahead.min(LOSS_MAX_TRACKED as u16) {
+                        self.missing.push_back((exp.wrapping_add(i), now));
+                    }
+                    self.expected = Some(seq.wrapping_add(1));
+                } else {
+                    // Late arrival (reordered or retransmitted): no longer missing.
+                    self.missing.retain(|(s, _)| *s != seq);
+                }
+            }
+        }
+
+        let overdue = self
+            .missing
+            .front()
+            .is_some_and(|(_, since)| now.duration_since(*since) >= LOSS_REPAIR_WINDOW);
+        if !overdue && self.missing.len() <= LOSS_MAX_TRACKED {
+            return false;
+        }
+        self.missing.clear();
+        if self.last_pli.is_some_and(|t| now.duration_since(t) < LOSS_PLI_INTERVAL) {
+            return false;
+        }
+        self.last_pli = Some(now);
+        true
+    }
 }
 
 async fn build_peer(state: &AppState) -> Result<Arc<RTCPeerConnection>, String> {
@@ -449,6 +550,7 @@ async fn build_peer(state: &AppState) -> Result<Arc<RTCPeerConnection>, String> 
     Ok(Arc::new(pc))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn start_ffmpeg(
     state: Arc<AppState>,
     source_id: Uuid,
@@ -457,6 +559,7 @@ async fn start_ffmpeg(
     video: VideoCodec,
     public_tx: broadcast::Sender<Bytes>,
     kind: IngestKind,
+    pc: &Weak<RTCPeerConnection>,
 ) -> Result<(), String> {
     let cfg = load_output_config(&state).await;
 
@@ -471,22 +574,24 @@ async fn start_ffmpeg(
 
     let ba = format!("{}k", cfg.audio_bitrate_kbps);
     let vf = format!(
-        "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
-        cfg.width, cfg.height, cfg.width, cfg.height
+        "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,{}",
+        cfg.width,
+        cfg.height,
+        cfg.width,
+        cfg.height,
+        crate::encoder::filter_tail(&cfg)
     );
-    let bv = format!("{}k", cfg.video_bitrate_kbps);
-    let maxrate = format!("{}k", cfg.video_bitrate_kbps);
-    let bufsize = format!("{}k", cfg.video_bitrate_kbps * 2);
-    let gop = format!("{}", cfg.fps * 2);
-    let fps = format!("{}", cfg.fps);
 
     // Always normalize onto the Studio canvas. A prior H.264 `-c:v copy` path
     // saved CPU but produced bus bitstreams that Channel HLS often decoded as
     // black while still writing a live playlist.
-    let args = vec![
+    let mut args: Vec<String> = vec![
         "-hide_banner".into(),
         "-loglevel".into(),
         "warning".into(),
+    ];
+    args.extend(crate::encoder::input_args(&cfg));
+    args.extend([
         "-protocol_whitelist".into(),
         "file,crypto,data,rtp,udp".into(),
         "-fflags".into(),
@@ -499,26 +604,12 @@ async fn start_ffmpeg(
         sdp_arg.clone(),
         "-vf".into(),
         vf,
-        "-c:v".into(),
-        "libx264".into(),
-        "-preset".into(),
-        "veryfast".into(),
-        "-tune".into(),
-        "zerolatency".into(),
-        "-bf".into(),
-        "0".into(),
-        "-b:v".into(),
-        bv,
-        "-maxrate".into(),
-        maxrate,
-        "-bufsize".into(),
-        bufsize,
-        "-g".into(),
-        gop,
-        "-r".into(),
-        fps,
-        "-pix_fmt".into(),
-        "yuv420p".into(),
+    ]);
+    args.extend(crate::encoder::webrtc_ingest_video_args(
+        &cfg,
+        &crate::encoder::Rate::canvas(&cfg),
+    ));
+    args.extend([
         "-c:a".into(),
         "aac".into(),
         "-b:a".into(),
@@ -532,7 +623,7 @@ async fn start_ffmpeg(
         "-flvflags".into(),
         "no_duration_filesize".into(),
         "pipe:1".into(),
-    ];
+    ]);
 
     tracing::info!(
         "starting ingest ffmpeg for {} ({:?}, video :{}, audio :{})",
@@ -568,11 +659,12 @@ async fn start_ffmpeg(
 
     {
         // Register the ffmpeg child while holding the normalizers lock, and only
-        // if the peer is still present. `stop_ingest` removes the child and the
-        // peer under this same lock, so this closes the race where a peer that
-        // drops during lazy startup could leave an unreaped ffmpeg child.
+        // if this peer is still the source's current one. `stop_ingest` removes
+        // the child and the peer under this same lock, so this closes the race
+        // where a peer that drops (or is replaced by a reconnect) during lazy
+        // startup could leave an unreaped ffmpeg child.
         let mut normalizers = state.source_normalizers.write().await;
-        if !state.guest_peers.read().await.contains_key(&source_id) {
+        if !is_current_peer(&*state.guest_peers.read().await, &source_id, pc) {
             return Err("peer torn down before ffmpeg start".to_string());
         }
         if let Some(mut old) = normalizers.remove(&source_id) {
@@ -612,12 +704,15 @@ async fn read_flv_output(
     }
 
     let mut frame_count: u64 = 0;
+    let mut meter =
+        crate::health::RealtimeMeter::new(state.clone(), source_id, crate::health::StageKind::Ingest);
 
     loop {
         let mut tag_header = [0u8; 11];
         if stdout.read_exact(&mut tag_header).await.is_err() {
             break;
         }
+        meter.observe(&tag_header);
 
         let tag_type = tag_header[0];
         let data_size = ((tag_header[1] as u32) << 16)
@@ -687,22 +782,60 @@ async fn read_flv_output(
     tracing::info!("ingest: ended for {} after {} frames", source_id, frame_count);
 }
 
+fn is_current_peer(
+    peers: &std::collections::HashMap<Uuid, Arc<RTCPeerConnection>>,
+    source_id: &Uuid,
+    pc: &Weak<RTCPeerConnection>,
+) -> bool {
+    peers
+        .get(source_id)
+        .is_some_and(|cur| std::ptr::eq(pc.as_ptr(), Arc::as_ptr(cur)))
+}
+
 /// Tear down an ingest: stop ffmpeg, close the peer, drop the media relay and
-/// sequence headers, mark the source Disconnected. For a guest, also delete the
-/// ephemeral source row and reset the guest record; a persistent source is kept.
+/// sequence headers, mark the source Disconnected. The source row is kept for
+/// both kinds (a guest keeps one source across reconnects so their scene
+/// layers and mixer settings survive); a guest's record is marked as left.
 pub async fn stop_ingest(state: &AppState, source_id: &Uuid, kind: IngestKind) {
+    stop_ingest_inner(state, source_id, kind, None).await
+}
+
+/// As [`stop_ingest`], but only if `pc` is still the source's current peer.
+/// Peer callbacks and watchdogs use this so a stale peer cannot tear down the
+/// ingest of a publisher who has already reconnected.
+async fn stop_ingest_if_current(
+    state: &AppState,
+    source_id: &Uuid,
+    kind: IngestKind,
+    pc: &Weak<RTCPeerConnection>,
+) {
+    stop_ingest_inner(state, source_id, kind, Some(pc)).await
+}
+
+async fn stop_ingest_inner(
+    state: &AppState,
+    source_id: &Uuid,
+    kind: IngestKind,
+    only_if_current: Option<&Weak<RTCPeerConnection>>,
+) {
     // Remove the ffmpeg child and the peer under one lock (paired with the
-    // peer-presence check in start_ffmpeg, so a concurrent lazy start cannot
+    // current-peer check in start_ffmpeg, so a concurrent lazy start cannot
     // leak a child). Close the peer AFTER releasing the lock and off this task:
     // this also runs from the peer-state-change callback, and awaiting
     // pc.close() inline there blocks on the very callback that is running, which
     // would leave the source stuck Live. Setting Disconnected must not wait on it.
     let peer = {
         let mut normalizers = state.source_normalizers.write().await;
+        let mut peers = state.guest_peers.write().await;
+        if let Some(pc) = only_if_current {
+            if !is_current_peer(&peers, source_id, pc) {
+                return;
+            }
+        }
         if let Some(mut child) = normalizers.remove(source_id) {
             let _ = child.kill().await;
         }
-        state.guest_peers.write().await.remove(source_id)
+        peers.remove(source_id)
     };
     state.remove_media_relay(source_id).await;
     state.sequence_headers.write().await.remove(source_id);
@@ -717,17 +850,10 @@ pub async fn stop_ingest(state: &AppState, source_id: &Uuid, kind: IngestKind) {
     });
 
     if kind == IngestKind::Guest {
-        let sid = source_id.to_string();
-        let _ = sqlx::query("DELETE FROM sources WHERE id = ?")
-            .bind(&sid)
+        let _ = sqlx::query("UPDATE guests SET status = 'left' WHERE source_id = ?")
+            .bind(source_id.to_string())
             .execute(&state.db)
             .await;
-        let _ = sqlx::query(
-            "UPDATE guests SET status = 'left', source_id = NULL WHERE source_id = ?",
-        )
-        .bind(&sid)
-        .execute(&state.db)
-        .await;
     }
 
     let data_dir = state.config.read().await.data_dir.clone();
@@ -780,6 +906,39 @@ mod tests {
         assert!(sdp.contains("a=fmtp:97 packetization-mode=1"));
         assert!(sdp.contains("m=audio 5002 RTP/AVP 111"));
         assert!(sdp.contains("a=rtpmap:111 opus/48000/2"));
+    }
+
+    #[test]
+    fn loss_in_order_stream_never_requests_keyframe() {
+        let mut t = LossTracker::default();
+        let start = std::time::Instant::now();
+        for i in 0..2000u32 {
+            let seq = (65000u32 + i) as u16; // crosses the u16 wrap
+            assert!(!t.observe(seq, start + Duration::from_millis(i as u64 * 10)));
+        }
+    }
+
+    #[test]
+    fn loss_repaired_by_retransmission_is_ignored() {
+        let mut t = LossTracker::default();
+        let t0 = std::time::Instant::now();
+        assert!(!t.observe(10, t0));
+        assert!(!t.observe(12, t0)); // 11 missing
+        assert!(!t.observe(11, t0 + Duration::from_millis(50))); // NACK fill
+        assert!(!t.observe(13, t0 + Duration::from_millis(400)));
+    }
+
+    #[test]
+    fn unrepaired_loss_requests_keyframe_rate_limited() {
+        let mut t = LossTracker::default();
+        let t0 = std::time::Instant::now();
+        t.observe(10, t0);
+        t.observe(12, t0); // 11 never arrives
+        assert!(t.observe(13, t0 + Duration::from_millis(300)));
+        t.observe(15, t0 + Duration::from_millis(400)); // 14 lost too
+        assert!(!t.observe(16, t0 + Duration::from_millis(800))); // within 2s
+        t.observe(18, t0 + Duration::from_millis(2500));
+        assert!(t.observe(19, t0 + Duration::from_millis(2800)));
     }
 
     #[test]

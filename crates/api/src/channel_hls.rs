@@ -83,54 +83,55 @@ impl ChannelHls {
         let playlist = hls_dir.join("index.m3u8");
         let segment = hls_dir.join("seg%05d.ts");
 
-        // Letterbox/pillarbox any input onto a fixed canvas so segments stay consistent
-        // across source switches (same approach as egress).
-        let vf = format!(
-            "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
-            cfg.width, cfg.height, cfg.width, cfg.height
-        );
-
-        let args: Vec<String> = vec![
+        let mut args: Vec<String> = vec![
             "-hide_banner".into(),
             "-loglevel".into(),
             "warning".into(),
-            "-f".into(),
-            "flv".into(),
-            "-i".into(),
-            "pipe:0".into(),
-            "-vf".into(),
-            vf,
-            "-c:v".into(),
-            "libx264".into(),
-            "-preset".into(),
-            "veryfast".into(),
-            "-tune".into(),
-            "zerolatency".into(),
-            "-b:v".into(),
-            format!("{}k", cfg.video_bitrate_kbps),
-            "-maxrate".into(),
-            format!("{}k", cfg.video_bitrate_kbps),
-            "-bufsize".into(),
-            format!("{}k", cfg.video_bitrate_kbps * 2),
-            "-g".into(),
-            format!("{}", cfg.fps * 2),
-            "-r".into(),
-            format!("{}", cfg.fps),
-            // Align keyframes to ~2s HLS segment boundaries.
-            "-force_key_frames".into(),
-            "expr:gte(t,n_forced*2)".into(),
-            "-pix_fmt".into(),
-            "yuv420p".into(),
-            "-c:a".into(),
-            "aac".into(),
-            "-b:a".into(),
-            format!("{}k", cfg.audio_bitrate_kbps),
-            "-ar".into(),
-            "48000".into(),
-            // Downmix to stereo — the native AAC encoder rejects 5.1/6-channel input
-            // ("Unsupported channel layout"), and destinations want stereo anyway.
-            "-ac".into(),
-            "2".into(),
+        ];
+
+        if cfg.transcode_hls {
+            // Letterbox/pillarbox any input onto a fixed canvas so segments stay
+            // consistent across source switches (same approach as egress).
+            let vf = format!(
+                "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,{}",
+                cfg.width,
+                cfg.height,
+                cfg.width,
+                cfg.height,
+                crate::encoder::filter_tail(&cfg)
+            );
+            args.extend(crate::encoder::input_args(&cfg));
+            args.extend(["-f".into(), "flv".into(), "-i".into(), "pipe:0".into(), "-vf".into(), vf]);
+            args.extend(crate::encoder::video_args(&cfg, &crate::encoder::Rate::canvas(&cfg)));
+            args.extend([
+                // Align keyframes to ~2s HLS segment boundaries.
+                "-force_key_frames".into(),
+                "expr:gte(t,n_forced*2)".into(),
+                "-c:a".into(),
+                "aac".into(),
+                "-b:a".into(),
+                format!("{}k", cfg.audio_bitrate_kbps),
+                "-ar".into(),
+                "48000".into(),
+                // Downmix to stereo — the native AAC encoder rejects 5.1/6-channel input
+                // ("Unsupported channel layout"), and destinations want stereo anyway.
+                "-ac".into(),
+                "2".into(),
+            ]);
+        } else {
+            // Every bus stream is already canvas-sized H.264 (2s GOP) + 48 kHz
+            // stereo AAC, so segment it as-is, like RTMP egress does.
+            args.extend([
+                "-f".into(),
+                "flv".into(),
+                "-i".into(),
+                "pipe:0".into(),
+                "-c".into(),
+                "copy".into(),
+            ]);
+        }
+
+        args.extend([
             "-f".into(),
             "hls".into(),
             "-hls_time".into(),
@@ -144,9 +145,13 @@ impl ChannelHls {
             "-hls_segment_filename".into(),
             segment.display().to_string(),
             playlist.display().to_string(),
-        ];
+        ]);
 
-        tracing::info!("starting channel HLS → {}", playlist.display());
+        tracing::info!(
+            "starting channel HLS → {} ({})",
+            playlist.display(),
+            if cfg.transcode_hls { "transcode" } else { "copy" }
+        );
 
         let mut child = Command::new("ffmpeg")
             .args(&args)

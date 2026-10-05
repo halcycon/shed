@@ -84,8 +84,8 @@ async fn capture_relay_flv(
         .map_err(|e| format!("write flv header: {e}"))?;
 
     {
-        let headers = state.sequence_headers.read().await;
-        if let Some(h) = headers.get(&source_id) {
+        let cached = state.sequence_headers.read().await.get(&source_id).cloned();
+        if let Some(h) = cached {
             if let Some(v) = &h.video {
                 let _ = file.write_all(v).await;
             }

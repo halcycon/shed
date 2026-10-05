@@ -1,6 +1,6 @@
 // Licensed under the GNU Affero General Public License v3.0 — see LICENSE.
 
-import type { Source, SourceKind, Destination, DestinationKind, ApiKey, Scene, Layer, LayerFit, RecordingState, StingerConfig, StingerAudio, Guest, BroadcastConfig, OutputConfig, OutputStats, AudioRouting, AudioAnalyseResult, AudioDspFilters, Asset, AssetFolder, User, ChannelConfig, WebrtcConfig, FailoverConfig, Schedule } from './types';
+import type { Source, SourceKind, Destination, DestinationKind, ApiKey, Scene, Layer, LayerFit, RecordingState, StingerConfig, StingerAudio, Guest, BroadcastConfig, OutputConfig, OutputStats, LoadStatus, AudioRouting, AudioAnalyseResult, AudioDspFilters, Asset, AssetFolder, User, ChannelConfig, WebrtcConfig, FailoverConfig, Schedule } from './types';
 
 function getSessionToken(): string {
 	if (typeof window === 'undefined') return '';
@@ -166,6 +166,7 @@ export const api = {
 	setFailover: (config: FailoverConfig) =>
 		request<FailoverConfig>('/failover', { method: 'PUT', body: JSON.stringify(config) }),
 	getOutputStats: () => request<OutputStats>('/output/stats'),
+	getLoad: () => request<LoadStatus>('/status/load'),
 
 	// Schedules (VOD scheduling)
 	listSchedules: () => request<Schedule[]>('/schedules'),

@@ -62,6 +62,8 @@ pub struct AppState {
     pub audio_routing: watch::Sender<AudioRouting>,
     /// System token for portal communication (immutable, always-valid)
     pub system_token: Option<String>,
+    /// Server CPU usage and per-stage realtime speed
+    pub health: crate::health::Health,
 }
 
 #[derive(Clone, Default)]
@@ -71,7 +73,7 @@ pub struct SequenceHeaders {
     pub last_keyframe: Option<Bytes>,
 }
 
-#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AudioDspFilters {
     /// When true, programme mixer inserts these filters before volume/amix.
     pub enabled: bool,

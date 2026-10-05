@@ -24,14 +24,13 @@ pub async fn start_srt_listener(
     let public_tx = state.get_or_create_media_relay(source_id).await;
 
     let vf = format!(
-        "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black",
-        cfg.width, cfg.height, cfg.width, cfg.height
+        "scale={}:{}:force_original_aspect_ratio=decrease,pad={}:{}:(ow-iw)/2:(oh-ih)/2:black,{}",
+        cfg.width,
+        cfg.height,
+        cfg.width,
+        cfg.height,
+        crate::encoder::filter_tail(&cfg)
     );
-    let bv = format!("{}k", cfg.video_bitrate_kbps);
-    let maxrate = format!("{}k", cfg.video_bitrate_kbps);
-    let bufsize = format!("{}k", cfg.video_bitrate_kbps * 2);
-    let gop = format!("{}", cfg.fps * 2);
-    let fps = format!("{}", cfg.fps);
     let ba = format!("{}k", cfg.audio_bitrate_kbps);
 
     let mut srt_url = format!("srt://0.0.0.0:{}?mode=listener", port);
@@ -41,27 +40,17 @@ pub async fn start_srt_listener(
         }
     }
 
-    let args = vec![
-        "-hide_banner",
-        "-loglevel", "warning",
-        "-i", &srt_url,
-        "-vf", &vf,
-        "-c:v", "libx264",
-        "-preset", "veryfast",
-        "-tune", "zerolatency",
-        "-b:v", &bv,
-        "-maxrate", &maxrate,
-        "-bufsize", &bufsize,
-        "-g", &gop,
-        "-r", &fps,
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac",
-        "-b:a", &ba,
-        "-ar", "48000",
-        "-f", "flv",
-        "-flvflags", "no_duration_filesize",
-        "pipe:1",
-    ];
+    let mut args: Vec<String> = vec!["-hide_banner".into(), "-loglevel".into(), "warning".into()];
+    args.extend(crate::encoder::input_args(&cfg));
+    args.extend(["-i".into(), srt_url, "-vf".into(), vf]);
+    args.extend(crate::encoder::video_args(&cfg, &crate::encoder::Rate::canvas(&cfg)));
+    args.extend(
+        [
+            "-c:a", "aac", "-b:a", &ba, "-ar", "48000", "-ac", "2",
+            "-f", "flv", "-flvflags", "no_duration_filesize", "pipe:1",
+        ]
+        .map(String::from),
+    );
 
     tracing::info!(
         "starting SRT listener for source {} on port {} ({}x{}@{}fps)",
