@@ -4,7 +4,9 @@
 	"version": "1.0.0",
 	"type": "module",
 	"scripts": {
+		"predev": "node scripts/copy-mediapipe-wasm.mjs",
 		"dev": "vite dev",
+		"prebuild": "node scripts/copy-mediapipe-wasm.mjs",
 		"build": "vite build",
 		"preview": "vite preview",
 		"prepare": "svelte-kit sync || echo ''",

@@ -4,7 +4,7 @@ import { FilesetResolver, ImageSegmenter } from '@mediapipe/tasks-vision';
 import type { BackgroundProcessor } from './background-processor';
 import { DEFAULT_BLUR_PX, PROCESS_HEIGHT } from './background-processor';
 
-const WASM_BASE = '/mediapipe';
+const WASM_BASE = '/mediapipe/wasm';
 const MODEL_PATH = '/mediapipe/selfie_segmenter.tflite';
 
 type VideoFrameCallback = (now: number, metadata: unknown) => void;

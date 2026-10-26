@@ -4,7 +4,7 @@
 	import { page } from '$app/stores';
 	import { createMicMeter, type MicMeterHandle } from '$lib/audio/mic-meter';
 	import type { EffectsMode } from '$lib/video-effects/background-processor';
-	import { tryCreateBlurProcessor, type MediapipeBlurProcessor } from '$lib/video-effects/mediapipe-segmenter';
+	import type { MediapipeBlurProcessor } from '$lib/video-effects/mediapipe-segmenter';
 
 	const token = $derived($page.params.token);
 
@@ -36,7 +36,8 @@
 	let processedVideoTrack = $state<MediaStreamTrack | null>(null);
 	let cameraEnabled = $state(true);
 	let microphoneEnabled = $state(true);
-	let blurAvailable = $state(false);
+	let blurLoading = $state(false);
+	let blurInit: Promise<boolean> | null = null;
 
 	let cameras = $state<MediaDeviceInfo[]>([]);
 	let mics = $state<MediaDeviceInfo[]>([]);
@@ -95,9 +96,6 @@
 			await refreshDevices();
 			startMicMeter();
 
-			// Warm blur processor in the background — failure must not block joining.
-			void ensureBlurReady();
-
 			mode = 'ready';
 		} catch (e) {
 			message = e instanceof Error ? e.message : 'Could not access camera or microphone.';
@@ -105,19 +103,32 @@
 		}
 	}
 
-	async function ensureBlurReady(): Promise<boolean> {
-		if (processor) {
-			blurAvailable = true;
-			return true;
+	/**
+	 * Load MediaPipe on first use so guests who never blur don't download the
+	 * runtime. Failure must not block joining.
+	 */
+	function ensureBlurReady(): Promise<boolean> {
+		if (processor) return Promise.resolve(true);
+		blurInit ??= loadBlurProcessor().finally(() => (blurInit = null));
+		return blurInit;
+	}
+
+	async function loadBlurProcessor(): Promise<boolean> {
+		blurLoading = true;
+		effectsWarning = '';
+		try {
+			const { tryCreateBlurProcessor } = await import('$lib/video-effects/mediapipe-segmenter');
+			processor = await tryCreateBlurProcessor();
+		} catch (e) {
+			console.warn('[guestux] background effects unavailable', e);
+			processor = null;
+		} finally {
+			blurLoading = false;
 		}
-		const created = await tryCreateBlurProcessor();
-		if (!created) {
-			blurAvailable = false;
+		if (!processor) {
 			effectsWarning = 'Background effects are not available in this browser.';
 			return false;
 		}
-		processor = created;
-		blurAvailable = true;
 		return true;
 	}
 
@@ -230,10 +241,7 @@
 
 	async function setBackgroundMode(next: EffectsMode) {
 		if (next === effectsMode) return;
-		if (next === 'blur' && !blurAvailable) {
-			const ok = await ensureBlurReady();
-			if (!ok) return;
-		}
+		if (next === 'blur' && !(await ensureBlurReady())) return;
 		effectsMode = next;
 		await rebuildVideoPipeline();
 	}
@@ -282,7 +290,6 @@
 		rawStream = null;
 		rawVideoTrack = null;
 		microphoneTrack = null;
-		blurAvailable = false;
 	}
 
 	function waitForIceGathering(peer: RTCPeerConnection, timeoutMs = 3000): Promise<void> {
@@ -466,9 +473,11 @@
 					type="button"
 					class="btn"
 					class:btn--go={effectsMode === 'blur'}
+					class:animate-pulse={blurLoading}
+					disabled={blurLoading}
 					onclick={() => setBackgroundMode('blur')}
 				>
-					Blur
+					{blurLoading ? 'Loading…' : 'Blur'}
 				</button>
 				{#if effectsWarning}
 					<span class="text-[12px] text-amber-muted">{effectsWarning}</span>

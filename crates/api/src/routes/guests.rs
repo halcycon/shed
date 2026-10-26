@@ -139,8 +139,11 @@ pub async fn public_info(
     let ice_servers = crate::routes::webrtc_config::load(&state).await.ice_servers;
 
     // Channel branding is optional — guest join still works if the channel row is absent.
+    // Only exposed for a public channel: the logo URL embeds the channel token, so a
+    // disabled or password-locked channel must not leak it (or its title) to guests.
     let channel = sqlx::query_as::<_, (String, Option<String>, Option<String>, String)>(
-        "SELECT title, logo_path, accent, token FROM channel WHERE id = 1",
+        "SELECT title, logo_path, accent, token FROM channel \
+         WHERE id = 1 AND enabled != 0 AND password_hash IS NULL",
     )
     .fetch_optional(&state.db)
     .await
