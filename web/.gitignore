@@ -21,3 +21,6 @@ Thumbs.db
 # Vite
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# MediaPipe WASM runtime, copied from node_modules at build time (scripts/copy-mediapipe-wasm.mjs)
+/static/mediapipe/wasm
